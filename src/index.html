@@ -1,10 +1,10 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: data: about:; img-src 'self' file: data: about: http: https:; style-src 'self' 'unsafe-inline' file:; script-src 'self' 'unsafe-inline' file:; connect-src 'self' file:;">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NGA BBCode Preview</title>
+  <title>NGA Banner Editor</title>
   <link rel="stylesheet" href="../img4.nga.178.com/ngabbs/nga_classic/css_default.css">
   <link rel="stylesheet" href="./app.css">
 </head>
@@ -26,7 +26,7 @@
       <section class="editor-pane">
         <header class="toolbar">
           <div>
-            <h1>NGA BBCode Preview</h1>
+            <h1>NGA Banner Editor</h1>
             <p id="pathInfo">Electron local preview</p>
           </div>
           <div class="actions editor-actions">
@@ -45,7 +45,7 @@
 
       <section class="resource-pane">
         <section class="resource-panel">
-          <header class="resource-panel-title">图片与链接清单 <span id="resourceCount">0</span></header>
+          <header class="resource-panel-title">资源清单 <span id="resourceCount">0</span> <label>排序 <select id="resourceSort"><option value="default">默认</option><option value="name-asc">名称升序</option><option value="name-desc">名称降序</option></select></label></header>
           <div id="resourceList" class="resource-list"></div>
         </section>
       </section>

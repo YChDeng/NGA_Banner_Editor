@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, session } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, session } = require('electron');
 const fs = require('fs/promises');
 const path = require('path');
 const vm = require('vm');
@@ -23,6 +23,20 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false
     }
+  });
+
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    if (!params.isEditable) return;
+    Menu.buildFromTemplate([
+      { label: '撤销', role: 'undo' },
+      { label: '重做', role: 'redo' },
+      { type: 'separator' },
+      { label: '剪切', role: 'cut' },
+      { label: '复制', role: 'copy' },
+      { label: '粘贴', role: 'paste' },
+      { type: 'separator' },
+      { label: '全选', role: 'selectAll' }
+    ]).popup({ window: mainWindow });
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
@@ -208,6 +222,17 @@ async function requestJson(ngaSession, url, form) {
   return parseNgaPayload(text);
 }
 
+function decodeNgaEditText(value) {
+  return String(value == null ? '' : value)
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#92;/g, '\\')
+    .replace(/&#36;/g, '$')
+    .replace(/&amp;/g, '&');
+}
 function asAttachmentArray(attachs) {
   if (!attachs || typeof attachs !== 'object') return [];
   if (Array.isArray(attachs)) return attachs;
@@ -232,8 +257,8 @@ async function getPostContext(parsed) {
     fid: Number(data.fid || parsed.fid || 0),
     tid: Number(data.tid || parsed.tid || 0),
     pid: Number(data.pid || parsed.pid || 0),
-    subject: String(data.subject || ''),
-    content: String(data.content || ''),
+    subject: decodeNgaEditText(data.subject),
+    content: decodeNgaEditText(data.content),
     auth: String(data.auth || ''),
     attachs: asAttachmentArray(data.attachs),
     attachmentsValue: '',

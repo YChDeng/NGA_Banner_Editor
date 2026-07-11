@@ -1,6 +1,9 @@
 ;(function () {
   const ATTACH_BASE = 'https://img.nga.178.com/attachments';
   const UNCATEGORIZED = '未分类';
+  const SYSTEM_UNCATEGORIZED_KEY = '__system_uncategorized__';
+  const SORT_STORAGE_KEY = 'resourceSortMode';
+  const SORT_MODES = new Set(['default', 'name-asc', 'name-desc']);
 
   const source = document.getElementById('source');
   const preview = document.getElementById('preview');
@@ -16,6 +19,7 @@
   const postStatus = document.getElementById('postStatus');
   const resourceList = document.getElementById('resourceList');
   const resourceCount = document.getElementById('resourceCount');
+  const resourceSort = document.getElementById('resourceSort');
   const resourceHoverPreview = document.getElementById('resourceHoverPreview');
   const appShell = document.querySelector('.app-shell');
   const mainResizer = document.querySelector('.main-resizer');
@@ -24,6 +28,8 @@
   let paths = null;
   let currentCatalog = null;
   let currentPostContext = null;
+  let resourceSortMode = readSortMode();
+  const directoryOpenState = new Map();
 
   function setStatus(message, isError) {
     status.textContent = message;
@@ -37,6 +43,7 @@
     initWorkbenchResize();
     initResourceHoverPreview();
     initResourceEditing();
+    initResourceSorting();
     await refreshAuthStatus();
     paths = await window.bbcodePreview.getPaths();
     window.__NGA_REMOTE_ATTACH_BASE = ATTACH_BASE;
@@ -263,6 +270,16 @@
 
   function initResourceEditing() {
     resourceList.addEventListener('click', function (event) {
+      const action = event.target.closest('[data-resource-action]');
+      if (action && resourceList.contains(action)) {
+        event.stopPropagation();
+        const start = Number(action.dataset.start);
+        const end = Number(action.dataset.end);
+        if (Number.isFinite(start) && Number.isFinite(end)) {
+          applyReplacements([{ start, end, value: action.dataset.value || '' }], captureResourceViewState(action));
+        }
+        return;
+      }
       if (event.target.closest('[data-edit-kind]')) event.stopPropagation();
     });
 
@@ -372,6 +389,33 @@
     restoreResourceViewState(viewState);
   }
 
+  function readSortMode() {
+    const value = localStorage.getItem(SORT_STORAGE_KEY);
+    return SORT_MODES.has(value) ? value : 'default';
+  }
+
+  function initResourceSorting() {
+    resourceSort.value = resourceSortMode;
+    resourceSort.addEventListener('change', function () {
+      const next = resourceSort.value;
+      resourceSortMode = SORT_MODES.has(next) ? next : 'default';
+      localStorage.setItem(SORT_STORAGE_KEY, resourceSortMode);
+      const viewState = captureResourceViewState(null);
+      rebuildResourceTree();
+      restoreResourceViewState(viewState);
+    });
+    resourceList.addEventListener('toggle', function (event) {
+      const details = event.target.closest && event.target.closest('.catalog-dir[data-directory-key]');
+      if (details) directoryOpenState.set(details.dataset.directoryKey, details.open);
+    }, true);
+  }
+
+  function rebuildResourceTree() {
+    if (!currentCatalog) return;
+    const tree = buildResourceTree(currentCatalog);
+    resourceList.innerHTML = renderCatalogSummary(currentCatalog) + renderTreeNode(tree, 0);
+  }
+
   function updateResourceList(bbcode) {
     currentCatalog = parseResourceCatalog(bbcode || '');
     resourceCount.textContent = String(currentCatalog.resources.length);
@@ -381,8 +425,7 @@
       return;
     }
 
-    const tree = buildResourceTree(currentCatalog);
-    resourceList.innerHTML = renderCatalogSummary(currentCatalog) + renderTreeNode(tree, 0);
+    rebuildResourceTree();
   }
 
   function parseResourceCatalog(bbcode) {
@@ -393,6 +436,7 @@
     const prefixStack = [];
     const suffixStack = [];
     const lines = splitLinesWithOffsets(bbcode);
+    const imageDefaults = [];
     let tokenSeq = 0;
     let resourceSeq = 0;
 
@@ -405,6 +449,7 @@
       while ((match = commentRegex.exec(line))) {
         const token = parseCommentToken(match, lineInfo.offset, tokenSeq++);
         tokensById[token.id] = token;
+        if (token.mode === 'imageDefault') imageDefaults.push(token);
         events.push({ kind: 'comment', index: match.index, token });
       }
 
@@ -420,7 +465,9 @@
       events.forEach(function (event) {
         if (event.kind === 'comment') {
           const token = event.token;
-          if (token.mode === 'prefixOpen') {
+          if (token.mode === 'imageDefault') {
+            return;
+          } else if (token.mode === 'prefixOpen') {
             prefixStack.push(token);
           } else if (token.mode === 'prefixClose') {
             closeStack(prefixStack, token, '前缀目录', errors);
@@ -468,6 +515,7 @@
     });
 
     collectUncategorized(bbcode, consumed, resources, resourceSeq);
+    applyImageDefaults(imageDefaults, resources, errors);
     return { resources, errors, tokensById };
   }
 
@@ -497,7 +545,14 @@
     let nameStartRel = 0;
     let nameEndRel = trimmed.length;
 
-    if (trimmed.startsWith('++')) {
+    const imageDefaultMatch = /^#([^!\]=]+)!\u56fe\u7247\s*=\s*(.*)$/.exec(trimmed);
+    let defaultValue = '';
+    if (imageDefaultMatch) {
+      mode = 'imageDefault';
+      nameStartRel = trimmed.indexOf(imageDefaultMatch[1]);
+      nameEndRel = nameStartRel + imageDefaultMatch[1].length;
+      defaultValue = imageDefaultMatch[2];
+    } else if (trimmed.startsWith('++')) {
       mode = 'prefixOpen';
       markerStart = '++';
       nameStartRel = 2;
@@ -534,6 +589,7 @@
       markerEnd,
       feature,
       name,
+      defaultValue,
       raw,
       line: lineNumberFromOffset(source.value || '', lineOffset),
       range: { start: lineOffset + match.index, end: lineOffset + match.index + match[0].length },
@@ -549,6 +605,7 @@
     const top = stack[stack.length - 1];
     if (top.name === closeToken.name) {
       stack.pop();
+      pairTokens(top, closeToken);
       return;
     }
     const foundIndex = stack.map(function (token) { return token.name; }).lastIndexOf(closeToken.name);
@@ -557,7 +614,13 @@
       return;
     }
     errors.push(makeError(label + '交叉关闭：' + closeToken.name + '，当前为 ' + top.name, closeToken));
-    stack.splice(foundIndex, 1);
+    const openToken = stack.splice(foundIndex, 1)[0];
+    pairTokens(openToken, closeToken);
+  }
+
+  function pairTokens(openToken, closeToken) {
+    openToken.pairedTokenId = closeToken.id;
+    closeToken.pairedTokenId = openToken.id;
   }
 
   function collectDybgEvents(line, lineInfo, events) {
@@ -617,17 +680,66 @@
   }
 
   function extractTextResource(line, lineInfo, token, prefixStack, suffixStack, seq) {
+    const localTokenStart = token.range.start - lineInfo.offset;
     const localStart = token.range.end - lineInfo.offset;
-    const rest = line.slice(localStart);
-    const close = rest.search(/\[\/[^\]]+\]/);
+    const openStyles = collectOpenStyleTags(line.slice(0, localTokenStart), lineInfo.offset);
     const valueStart = token.range.end;
-    const valueEnd = close === -1 ? valueStart : valueStart + close;
-    const item = createBaseResource('text', '文本', token, prefixStack, suffixStack, seq);
+    const valueEndLocal = findTextContainerEnd(line, localStart, openStyles.length);
+    const valueEnd = valueEndLocal === -1 ? valueStart : lineInfo.offset + valueEndLocal;
+    const item = createBaseResource('text', '\u6587\u672c', token, prefixStack, suffixStack, seq);
     item.value = (source.value || '').slice(valueStart, valueEnd);
     item.valueRange = { start: valueStart, end: valueEnd };
     item.range = { start: token.range.start, end: valueEnd };
-    if (close === -1) item.errors.push('未找到文本后的闭合标签');
+    item.textStyles = extractTextStyleFields(openStyles);
+    if (valueEndLocal === -1) item.errors.push('\u672a\u627e\u5230\u5305\u88f9\u6587\u672c\u7684 style \u95ed\u5408\u6807\u7b7e');
     return item;
+  }
+
+  function collectOpenStyleTags(prefix, lineOffset) {
+    const stack = [];
+    const regex = /\[(\/?)style(?:\s+([^\]]*))?\]/gi;
+    let match;
+    while ((match = regex.exec(prefix))) {
+      if (match[1]) stack.pop();
+      else stack.push({ content: match[2] || '', contentStart: lineOffset + match.index + match[0].indexOf(match[2] || '') });
+    }
+    return stack;
+  }
+
+  function findTextContainerEnd(line, localStart, initialDepth) {
+    if (!initialDepth) return -1;
+    const regex = /\[(\/?)style(?:\s+[^\]]*)?\]/gi;
+    regex.lastIndex = localStart;
+    let depth = initialDepth;
+    let match;
+    while ((match = regex.exec(line))) {
+      if (match[1]) {
+        depth -= 1;
+        if (depth < initialDepth) return match.index;
+      } else {
+        depth += 1;
+      }
+    }
+    return -1;
+  }
+
+  function extractTextStyleFields(openStyles) {
+    const fields = [];
+    openStyles.forEach(function (style) {
+      const tokens = tokenizeTagContent(style.content, style.contentStart);
+      for (let index = 0; index < tokens.length; index += 1) {
+        const key = tokens[index].value.toLowerCase();
+        const value = tokens[index + 1];
+        if (key === 'color' && value && /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(value.value)) {
+          fields.push({ key: 'color', label: '\u6587\u5b57\u989c\u8272', value: value.value, range: value.range, kind: 'text-color' });
+          index += 1;
+        } else if (key === 'font' && value && /^(?:\d+(?:\.\d+)?|\.\d+)$/.test(value.value) && Number(value.value) > 0) {
+          fields.push({ key: 'font', label: '\u5b57\u53f7 (em)', value: value.value, range: value.range, kind: 'number' });
+          index += 1;
+        }
+      }
+    });
+    return fields;
   }
 
   function extractAttributeResource(line, lineInfo, token, prefixStack, suffixStack, seq) {
@@ -808,6 +920,7 @@
       nameTokenId: nameToken ? nameToken.id : '',
       pathParts: parts,
       pathTokenIds,
+      pathKeys: hasName ? pathTokenIds.map(function (id, index) { return id || ('name:' + parts[index]); }) : [SYSTEM_UNCATEGORIZED_KEY],
       path: '\\' + parts.join('\\'),
       line: nameToken ? nameToken.line : 0,
       errors: []
@@ -825,6 +938,7 @@
         name: UNCATEGORIZED,
         pathParts: [UNCATEGORIZED],
         pathTokenIds: [],
+        pathKeys: [SYSTEM_UNCATEGORIZED_KEY],
         path: '\\' + UNCATEGORIZED,
         line: lineNumberFromOffset(bbcode, start),
         value,
@@ -858,6 +972,7 @@
           name: UNCATEGORIZED,
           pathParts: [UNCATEGORIZED],
           pathTokenIds: [],
+          pathKeys: [SYSTEM_UNCATEGORIZED_KEY],
           path: '\\' + UNCATEGORIZED,
           line: lineNumberFromOffset(bbcode, match.index),
           params: [
@@ -890,6 +1005,24 @@
     }
   }
 
+  function applyImageDefaults(declarations, resources, errors) {
+    const byName = Object.create(null);
+    declarations.forEach(function (declaration) {
+      if (!byName[declaration.name]) byName[declaration.name] = [];
+      byName[declaration.name].push(declaration);
+    });
+    Object.keys(byName).forEach(function (name) {
+      const matches = byName[name];
+      if (matches.length > 1) {
+        matches.forEach(function (token) { errors.push(makeError('\u91cd\u590d\u7684\u56fe\u7247\u9ed8\u8ba4\u58f0\u660e\uff1a' + name, token)); });
+        return;
+      }
+      resources.forEach(function (item) {
+        if (item.type === 'image' && item.pathParts[item.pathParts.length - 1] === name) item.defaultUrl = matches[0].defaultValue;
+      });
+    });
+  }
+
   function makeError(message, token) {
     return {
       id: 'e' + token.id,
@@ -901,20 +1034,28 @@
   }
 
   function buildResourceTree(catalog) {
-    const root = { name: '', children: Object.create(null), resources: [], tokenIds: new Set(), errors: [] };
-    catalog.resources.forEach(function (item) {
+    const root = { key: '', name: '', children: [], childMap: Object.create(null), resources: [], tokenIds: new Set(), errors: [], sourceOrder: -1 };
+    catalog.resources.forEach(function (item, resourceIndex) {
       let node = root;
       item.pathParts.forEach(function (part, index) {
-        if (!node.children[part]) node.children[part] = { name: part, children: Object.create(null), resources: [], tokenIds: new Set(), errors: [] };
-        node = node.children[part];
+        const segmentKey = (item.pathKeys && item.pathKeys[index]) || ('name:' + part);
+        const fullKey = (node.key ? node.key + '/' : '') + segmentKey;
+        if (!node.childMap[segmentKey]) {
+          const child = { key: fullKey, name: part, children: [], childMap: Object.create(null), resources: [], tokenIds: new Set(), errors: [], sourceOrder: resourceIndex, isSystemUncategorized: fullKey === SYSTEM_UNCATEGORIZED_KEY };
+          node.childMap[segmentKey] = child;
+          node.children.push(child);
+        }
+        node = node.childMap[segmentKey];
         const tokenId = item.pathTokenIds[index];
-        if (tokenId) node.tokenIds.add(tokenId);
+        if (tokenId) {
+          node.tokenIds.add(tokenId);
+          const token = catalog.tokensById[tokenId];
+          if (token && token.pairedTokenId) node.tokenIds.add(token.pairedTokenId);
+        }
       });
       node.resources.push(item);
     });
-    catalog.errors.forEach(function (error) {
-      root.errors.push(error);
-    });
+    catalog.errors.forEach(function (error) { root.errors.push(error); });
     return root;
   }
 
@@ -928,17 +1069,31 @@
   }
 
   function renderTreeNode(node, depth) {
-    const names = Object.keys(node.children).sort(naturalCompare);
-    const childHtml = names.map(function (name) {
-      const child = node.children[name];
+    const children = node.children.slice().sort(compareDirectories);
+    const childHtml = children.map(function (child) {
       const tokenIds = Array.from(child.tokenIds);
+      const systemLabel = child.isSystemUncategorized ? '<span class="dir-system-mark">（系统）</span>' : '';
       const rename = tokenIds.length
         ? '<input class="dir-name-input" data-edit-kind="comment-name-bulk" data-focus-key="dir:' + escapeHtml(tokenIds.join(',')) + '" data-token-ids="' + escapeHtml(tokenIds.join(',')) + '" value="' + escapeHtml(child.name) + '" title="修改关联 comment 名称">'
-        : '<span class="dir-name-static">' + escapeHtml(child.name) + '</span>';
-      return '<details class="catalog-dir" open style="--depth:' + depth + '"><summary>' + rename + '<span class="dir-count">' + countResources(child) + '</span></summary>' + renderTreeNode(child, depth + 1) + '</details>';
+        : '<span class="dir-name-static">' + escapeHtml(child.name) + systemLabel + '</span>';
+      const isOpen = directoryOpenState.has(child.key) ? directoryOpenState.get(child.key) : !child.isSystemUncategorized;
+      return '<details class="catalog-dir' + (child.isSystemUncategorized ? ' catalog-dir-system' : '') + '" data-directory-key="' + escapeHtml(child.key) + '"' + (isOpen ? ' open' : '') + ' style="--depth:' + depth + '"><summary>' + rename + '<span class="dir-count">' + countResources(child) + '</span></summary>' + renderTreeNode(child, depth + 1) + '</details>';
     }).join('');
-    const resourceHtml = node.resources.map(renderResourceItem).join('');
-    return '<div class="catalog-node">' + childHtml + resourceHtml + '</div>';
+    const resources = node.resources.slice();
+    if (resourceSortMode !== 'default') resources.sort(compareResources);
+    return '<div class="catalog-node">' + childHtml + resources.map(renderResourceItem).join('') + '</div>';
+  }
+
+  function compareDirectories(a, b) {
+    if (a.isSystemUncategorized !== b.isSystemUncategorized) return a.isSystemUncategorized ? 1 : -1;
+    const compared = naturalCompare(a.name, b.name);
+    if (resourceSortMode === 'name-desc') return -compared || a.sourceOrder - b.sourceOrder;
+    return compared || a.sourceOrder - b.sourceOrder;
+  }
+
+  function compareResources(a, b) {
+    const compared = naturalCompare(a.name, b.name);
+    return (resourceSortMode === 'name-desc' ? -compared : compared) || Number(a.id.slice(1)) - Number(b.id.slice(1));
   }
 
   function renderResourceItem(item) {
@@ -959,8 +1114,8 @@
 
   function renderResourceEditor(item) {
     if (item.type === 'image') return renderImageEditor(item);
-    if (item.type === 'url') return renderInputField('链接', item.value, item.valueRange, 'url', 'resource-url-input');
-    if (item.type === 'text') return renderTextareaField('文本', item.value, item.valueRange);
+    if (item.type === 'url') return renderInputField('\u94fe\u63a5', item.value, item.valueRange, 'url', 'resource-url-input', { clear: true });
+    if (item.type === 'text') return renderTextEditor(item);
     if (item.type === 'attr') return renderAttributeEditor(item);
     return '';
   }
@@ -971,7 +1126,16 @@
     const params = item.params ? '<div class="dybg-param-grid">' + item.params.map(function (param) {
       return renderInputField(param.label, param.field.value, param.field.range, 'text');
     }).join('') + '</div>' : '';
-    return '<div class="image-editor">' + thumb + '<div class="resource-fields">' + renderInputField('图片链接', item.url || '', item.urlRange, 'text', 'resource-url-input') + params + '</div></div>';
+    return '<div class="image-editor">' + thumb + '<div class="resource-fields">' + renderInputField('图片链接', item.url || '', item.urlRange, 'text', 'resource-url-input', { clear: true, defaultValue: item.defaultUrl }) + params + '</div></div>';
+  }
+
+  function renderTextEditor(item) {
+    const styleFields = item.textStyles && item.textStyles.length
+      ? '<div class="text-style-fields">' + item.textStyles.map(function (field) {
+          return renderInputField(field.label, field.value, field.range, field.kind === 'number' ? 'number' : 'text', field.kind === 'text-color' ? 'color-hex-input' : '', field.kind === 'number' ? { min: '0', step: 'any' } : {});
+        }).join('') + '</div>'
+      : '';
+    return '<div class="resource-fields">' + renderTextareaField('\u6587\u672c', item.value, item.valueRange, { clear: true }) + styleFields + '</div>';
   }
 
   function renderAttributeEditor(item) {
@@ -1002,17 +1166,25 @@
     return match ? match[0] : '';
   }
 
-  function renderInputField(label, value, range, type, className) {
-    return '<label>' + escapeHtml(label) + '<input class="' + escapeHtml(className || '') + '" type="' + escapeHtml(type || 'text') + '" data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':input" data-start="' + range.start + '" data-end="' + range.end + '" value="' + escapeHtml(value || '') + '"></label>';
+  function renderValueActions(value, range, options) {
+    const clear = options && options.clear ? '<button type="button" data-resource-action="clear" data-start="' + range.start + '" data-end="' + range.end + '" data-value=""' + (value ? '' : ' disabled') + '>\u6e05\u7a7a</button>' : '';
+    const hasDefault = options && Object.prototype.hasOwnProperty.call(options, 'defaultValue') && options.defaultValue !== undefined;
+    const defaultButton = hasDefault ? '<button type="button" data-resource-action="default" data-start="' + range.start + '" data-end="' + range.end + '" data-value="' + escapeHtml(options.defaultValue) + '"' + (value === options.defaultValue ? ' disabled' : '') + '>\u9ed8\u8ba4</button>' : '';
+    return clear || defaultButton ? '<span class="resource-value-actions">' + clear + defaultButton + '</span>' : '';
   }
 
-  function renderTextareaField(label, value, range) {
-    return '<label class="text-resource-field">' + escapeHtml(label) + '<textarea data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':textarea" data-start="' + range.start + '" data-end="' + range.end + '">' + escapeHtml(value || '') + '</textarea></label>';
+  function renderInputField(label, value, range, type, className, options) {
+    const constraints = options ? (options.min != null ? ' min="' + escapeHtml(options.min) + '"' : '') + (options.step != null ? ' step="' + escapeHtml(options.step) + '"' : '') : '';
+    return '<label>' + escapeHtml(label) + '<span class="resource-value-control"><input class="' + escapeHtml(className || '') + '" type="' + escapeHtml(type || 'text') + '" data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':input" data-start="' + range.start + '" data-end="' + range.end + '" value="' + escapeHtml(value || '') + '"' + constraints + '>' + renderValueActions(value || '', range, options) + '</span></label>';
+  }
+
+  function renderTextareaField(label, value, range, options) {
+    return '<label class="text-resource-field">' + escapeHtml(label) + '<span class="resource-value-control"><textarea data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':textarea" data-start="' + range.start + '" data-end="' + range.end + '">' + escapeHtml(value || '') + '</textarea>' + renderValueActions(value || '', range, options) + '</span></label>';
   }
 
   function countResources(node) {
-    return node.resources.length + Object.keys(node.children).reduce(function (sum, key) {
-      return sum + countResources(node.children[key]);
+    return node.resources.length + node.children.reduce(function (sum, child) {
+      return sum + countResources(child);
     }, 0);
   }
 
@@ -1046,6 +1218,7 @@
   loginNgaButton.addEventListener('click', openLogin);
   loadPostButton.addEventListener('click', loadPostFromUrl);
   savePostButton.addEventListener('click', saveCurrentPost);
+  resourceSort.value = resourceSortMode;
   source.addEventListener('keydown', function (event) {
     if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') render();
   });

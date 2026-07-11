@@ -213,11 +213,16 @@ body {
 }
 
 .catalog-summary {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  height: 30px;
   margin: 0 0 8px;
-  padding: 6px 8px;
+  padding: 5px 8px;
   border: 1px solid #e6c3a8;
   background: #fffcee;
   color: #58697b;
+  line-height: 18px;
 }
 
 .resource-errors,
@@ -233,21 +238,34 @@ body {
 }
 
 .catalog-dir {
-  margin: 3px 0 3px calc(var(--depth, 0) * 14px);
+  margin: 3px 0 3px 14px;
   border-left: 1px solid #d7b99e;
   padding-left: 6px;
 }
 
+.catalog-node > .catalog-dir {
+  margin-left: 0;
+}
+
+.catalog-dir .catalog-node > .catalog-dir {
+  margin-left: 14px;
+}
+
 .catalog-dir > summary {
+  position: sticky;
+  top: calc(30px + var(--depth, 0) * 30px);
+  z-index: calc(900 - var(--depth, 0));
   display: grid;
   grid-template-columns: 1em minmax(0, 1fr) auto;
   align-items: center;
   gap: 4px;
+  height: 30px;
   padding: 3px 6px;
   list-style: none;
   background: #fff0cd;
-  border: 1px solid #ead0b8;
+  border: 1px solid #d7b99e;
   border-left-width: 3px;
+  line-height: 22px;
 }
 
 .catalog-dir > summary::-webkit-details-marker {
@@ -268,23 +286,25 @@ body {
   min-width: 6em;
   max-width: 100%;
   width: 100%;
+  height: 22px;
+  padding: 1px 4px;
   border: 1px solid #d7b99e;
   background: #fffcee;
   color: #591804;
-  font: bold 12px/1.3 system-ui, sans-serif;
+  font: bold 11px/18px system-ui, sans-serif;
 }
 
 .dir-name-static {
   overflow: hidden;
   color: #591804;
-  font: bold 12px/1.3 system-ui, sans-serif;
+  font: bold 11px/1.3 system-ui, sans-serif;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .dir-count {
   color: #58697b;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: normal;
 }
 
@@ -495,4 +515,41 @@ body {
 .resizing-main * {
   cursor: row-resize !important;
   user-select: none !important;
+}
+
+
+.resource-value-control {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.resource-value-control > input,
+.resource-value-control > textarea {
+  flex: 1 1 auto;
+}
+
+.resource-value-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.resource-value-actions button {
+  min-width: 3.5em;
+  white-space: nowrap;
+}
+
+.resource-value-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.text-style-fields {
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  border: 1px dashed #d7b99e;
+  background: #fff8e7;
 }

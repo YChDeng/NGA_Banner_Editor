@@ -1,4 +1,4 @@
-﻿# NGA BBCode Preview
+# NGA Banner Editor
 
 一个用于本地预览、整理和编辑 NGA 论坛 BBCode 的 Electron GUI 程序。
 
@@ -76,6 +76,15 @@ npm start
 - 属性：`[comment // Name!属性][style ...]` 或 `[fixsize ...]`
 
 无法通过 comment 规则归类的资源会放入 `\未分类`。
+图片可以声明按路径末级名称匹配的默认值：
+
+```bbcode
+[comment // #悬停效果!图片 = ./mon_202601/18/example.webp]
+```
+
+该声明会为所有资源路径最后一级严格等于 `悬停效果` 的图片提供“默认”操作，但不会自动覆盖图片当前值。图片、链接和文本均可使用“清空”操作；这些操作只修改资源值，不改变 `dybg` 参数、`style` 布局或其他属性。同名图片默认声明重复时不会应用，并会在资源面板中显示错误。
+
+对于 `[comment // Name!文本]`，资源面板还会读取同一行中、位于 comment 之前并仍包裹文本的 `style` 标签。目前可编辑 `color`（文字颜色，仅 `#RGB` 或 `#RRGGBB`）以及 `font` 的首个参数（字号，单位 `em`）；不会从其他行继承这些属性。
 
 ## 属性解析
 
