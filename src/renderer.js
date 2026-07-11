@@ -1,0 +1,1056 @@
+;(function () {
+  const ATTACH_BASE = 'https://img.nga.178.com/attachments';
+  const UNCATEGORIZED = '未分类';
+
+  const source = document.getElementById('source');
+  const preview = document.getElementById('preview');
+  const status = document.getElementById('status');
+  const previewStatus = document.getElementById('previewStatus');
+  const pathInfo = document.getElementById('pathInfo');
+  const loadSampleButton = document.getElementById('loadSample');
+  const renderButton = document.getElementById('render');
+  const loginNgaButton = document.getElementById('loginNga');
+  const postUrlInput = document.getElementById('postUrl');
+  const loadPostButton = document.getElementById('loadPost');
+  const savePostButton = document.getElementById('savePost');
+  const postStatus = document.getElementById('postStatus');
+  const resourceList = document.getElementById('resourceList');
+  const resourceCount = document.getElementById('resourceCount');
+  const resourceHoverPreview = document.getElementById('resourceHoverPreview');
+  const appShell = document.querySelector('.app-shell');
+  const mainResizer = document.querySelector('.main-resizer');
+  const workbenchPane = document.querySelector('.workbench-pane');
+
+  let paths = null;
+  let currentCatalog = null;
+  let currentPostContext = null;
+
+  function setStatus(message, isError) {
+    status.textContent = message;
+    status.style.color = isError ? '#b63f32' : '#58697b';
+    previewStatus.textContent = message;
+    previewStatus.style.color = isError ? '#b63f32' : '#58697b';
+  }
+
+  async function init() {
+    initMainResize();
+    initWorkbenchResize();
+    initResourceHoverPreview();
+    initResourceEditing();
+    await refreshAuthStatus();
+    paths = await window.bbcodePreview.getPaths();
+    window.__NGA_REMOTE_ATTACH_BASE = ATTACH_BASE;
+    if (window.commonui) {
+      window.commonui.getAttachBase = function () { return ATTACH_BASE; };
+    }
+    pathInfo.textContent = '未自动加载示例 | images: ' + ATTACH_BASE;
+    updateResourceList('');
+    setStatus('准备就绪');
+  }
+
+  async function refreshAuthStatus() {
+    try {
+      const result = await window.bbcodePreview.authStatus();
+      postStatus.textContent = result.loggedIn ? 'NGA 已登录' : 'NGA 未登录';
+    } catch (error) {
+      postStatus.textContent = '登录状态检查失败：' + error.message;
+    }
+  }
+
+  async function openLogin() {
+    setStatus('正在打开 NGA 登录窗口...');
+    try {
+      const loggedIn = await window.bbcodePreview.openLogin();
+      postStatus.textContent = loggedIn ? 'NGA 已登录' : '未检测到登录态';
+      setStatus(loggedIn ? '登录成功' : '登录窗口已关闭，未检测到登录态', !loggedIn);
+    } catch (error) {
+      setStatus('登录失败：' + error.message, true);
+    }
+  }
+
+  async function loadPostFromUrl() {
+    const postUrl = postUrlInput.value.trim();
+    if (!postUrl) {
+      setStatus('请输入帖子链接', true);
+      return;
+    }
+    setStatus('正在导入帖子...');
+    try {
+      const result = await window.bbcodePreview.loadPost(postUrl);
+      currentPostContext = result.context;
+      source.value = currentPostContext.content || '';
+      postStatus.textContent = '已导入 tid=' + currentPostContext.tid + ', pid=' + currentPostContext.pid;
+      setStatus('已导入帖子：' + (currentPostContext.subject || '(无标题)'));
+      render();
+    } catch (error) {
+      setStatus('导入帖子失败：' + error.message, true);
+    }
+  }
+
+  async function saveCurrentPost() {
+    if (!currentPostContext) {
+      setStatus('请先导入帖子', true);
+      return;
+    }
+    if (!confirm('确认发布当前 BBCode 到已导入的帖子？')) return;
+    setStatus('正在发布修改...');
+    try {
+      const result = await window.bbcodePreview.savePost(source.value || '');
+      setStatus(result.message || '发布成功');
+      postStatus.textContent = '发布成功 tid=' + currentPostContext.tid;
+    } catch (error) {
+      setStatus('发布失败：' + error.message, true);
+    }
+  }
+
+  async function loadSample() {
+    try {
+      source.value = await window.bbcodePreview.readSample();
+      setStatus('已加载示例 BBCode');
+      render();
+    } catch (error) {
+      setStatus('加载示例失败：' + error.message, true);
+    }
+  }
+
+  function render() {
+    const txt = source.value || '';
+    preview.innerHTML = '';
+    updateResourceList(txt);
+
+    try {
+      renderWithOriginalParser(txt);
+      setStatus('已使用 NGA 原解析器渲染');
+    } catch (error) {
+      console.error('NGA parser failed.', error);
+      preview.innerHTML = '<div class="render-error"></div>';
+      preview.firstChild.textContent = error.stack || error.message;
+      setStatus('NGA 原解析器失败：' + error.message, true);
+    }
+  }
+
+  function renderWithOriginalParser(txt) {
+    if (!window.ubbcode || typeof window.ubbcode.bbsCode !== 'function') {
+      throw new Error('ubbcode.bbsCode 不可用');
+    }
+    if (window.__NGA_PATCH_UBBCODE_ATTACH) window.__NGA_PATCH_UBBCODE_ATTACH();
+
+    const args = {
+      c: preview,
+      txt: txt.replace(/\r?\n/g, '<br/>'),
+      opt: 4 | 1 | 16 | 32768,
+      noImg: 0,
+      fId: 0,
+      inTopImg: [0, 0],
+      isSig: 0,
+      isLesser: true,
+      maxWidthO: document.getElementById('previewHost')
+    };
+
+    window.ubbcode.bbsCode(args);
+  }
+
+  function initMainResize() {
+    if (!appShell || !mainResizer) return;
+    let dragging = false;
+
+    mainResizer.addEventListener('mousedown', function (event) {
+      dragging = true;
+      document.body.classList.add('resizing-main');
+      event.preventDefault();
+    });
+
+    window.addEventListener('mousemove', function (event) {
+      if (!dragging) return;
+      const rect = appShell.getBoundingClientRect();
+      const top = Math.min(Math.max(event.clientY - rect.top, 220), rect.height - 220);
+      appShell.style.gridTemplateRows = top + 'px 8px minmax(220px, 1fr)';
+    });
+
+    window.addEventListener('mouseup', function () {
+      if (!dragging) return;
+      dragging = false;
+      document.body.classList.remove('resizing-main');
+    });
+  }
+
+  function initWorkbenchResize() {
+    if (!workbenchPane) return;
+    let dragging = false;
+
+    workbenchPane.addEventListener('mousedown', function (event) {
+      const rect = workbenchPane.getBoundingClientRect();
+      const current = getComputedStyle(workbenchPane).gridTemplateColumns.split(' ');
+      const gutterLeft = parseFloat(current[0]) || rect.width * 0.58;
+      if (Math.abs(event.clientX - rect.left - gutterLeft) > 8) return;
+      dragging = true;
+      document.body.classList.add('resizing-workbench');
+      event.preventDefault();
+    });
+
+    window.addEventListener('mousemove', function (event) {
+      if (!dragging) return;
+      const rect = workbenchPane.getBoundingClientRect();
+      const left = Math.min(Math.max(event.clientX - rect.left, 280), rect.width - 320);
+      workbenchPane.style.gridTemplateColumns = left + 'px 8px minmax(320px, 1fr)';
+    });
+
+    window.addEventListener('mouseup', function () {
+      if (!dragging) return;
+      dragging = false;
+      document.body.classList.remove('resizing-workbench');
+    });
+  }
+
+  function initResourceHoverPreview() {
+    if (!resourceList || !resourceHoverPreview) return;
+    const previewImage = resourceHoverPreview.querySelector('img');
+
+    resourceList.addEventListener('mouseover', function (event) {
+      const link = event.target.closest('.resource-thumb-link');
+      if (!link || !resourceList.contains(link)) return;
+      previewImage.src = link.dataset.previewUrl || '';
+      resourceHoverPreview.classList.add('is-visible');
+      positionResourceHoverPreview(link);
+    });
+
+    resourceList.addEventListener('mousemove', function (event) {
+      const link = event.target.closest('.resource-thumb-link');
+      if (!link || !resourceList.contains(link)) return;
+      positionResourceHoverPreview(link);
+    });
+
+    resourceList.addEventListener('mouseout', function (event) {
+      const link = event.target.closest('.resource-thumb-link');
+      if (!link || link.contains(event.relatedTarget)) return;
+      resourceHoverPreview.classList.remove('is-visible');
+      previewImage.removeAttribute('src');
+    });
+
+    window.addEventListener('resize', function () {
+      resourceHoverPreview.classList.remove('is-visible');
+    });
+  }
+
+  function positionResourceHoverPreview(anchor) {
+    const gap = 12;
+    const margin = 12;
+    const resourceRect = resourceList.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    const previewRect = resourceHoverPreview.getBoundingClientRect();
+    const width = previewRect.width;
+    const height = previewRect.height;
+    const leftSpace = resourceRect.left - margin - gap;
+    const rightSpace = window.innerWidth - resourceRect.right - margin - gap;
+    let left;
+
+    if (leftSpace >= width || leftSpace >= rightSpace) {
+      left = resourceRect.left - width - gap;
+    } else {
+      left = resourceRect.right + gap;
+    }
+
+    if (left < margin) left = margin;
+    if (left + width > window.innerWidth - margin) left = window.innerWidth - width - margin;
+
+    let top = anchorRect.top + (anchorRect.height / 2) - (height / 2);
+    if (top < margin) top = margin;
+    if (top + height > window.innerHeight - margin) top = window.innerHeight - height - margin;
+
+    resourceHoverPreview.style.left = left + 'px';
+    resourceHoverPreview.style.top = top + 'px';
+  }
+
+  function initResourceEditing() {
+    resourceList.addEventListener('click', function (event) {
+      if (event.target.closest('[data-edit-kind]')) event.stopPropagation();
+    });
+
+    resourceList.addEventListener('keydown', function (event) {
+      if (event.target.closest('[data-edit-kind]') && event.key === 'Enter' && event.target.tagName !== 'TEXTAREA') {
+        event.target.blur();
+      }
+    });
+
+    resourceList.addEventListener('change', function (event) {
+      const control = event.target.closest('[data-edit-kind]');
+      if (!control || !resourceList.contains(control)) return;
+      applyResourceEdit(control);
+    });
+  }
+
+  function applyResourceEdit(control) {
+    const kind = control.dataset.editKind;
+    let nextValue = control.value || '';
+    if (kind === 'comment-name-bulk') {
+      const tokenIds = (control.dataset.tokenIds || '').split(',').filter(Boolean);
+      const replacements = tokenIds.map(function (id) {
+        const token = currentCatalog && currentCatalog.tokensById[id];
+        return token ? { start: token.nameRange.start, end: token.nameRange.end, value: nextValue } : null;
+      }).filter(Boolean);
+      applyReplacements(replacements, captureResourceViewState(control));
+      return;
+    }
+
+    if (kind === 'color') {
+      const alphaControl = control.parentNode && control.parentNode.querySelector('[data-color-alpha]');
+      const alpha = alphaControl ? alphaControl.value : (control.dataset.alpha || '');
+      nextValue = nextValue + normalizeAlpha(alpha);
+    }
+
+    const start = Number(control.dataset.start);
+    const end = Number(control.dataset.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+    applyReplacements([{ start, end, value: nextValue }], captureResourceViewState(control));
+  }
+
+  function captureResourceViewState(control) {
+    const anchor = control ? control.closest('[data-resource-key]') : null;
+    const listRect = resourceList.getBoundingClientRect();
+    const anchorRect = anchor ? anchor.getBoundingClientRect() : null;
+    return {
+      scrollTop: resourceList.scrollTop,
+      focusKey: control ? control.dataset.focusKey || '' : '',
+      anchorKey: anchor ? anchor.dataset.resourceKey || '' : '',
+      anchorOffset: anchorRect ? anchorRect.top - listRect.top : null,
+      selectionStart: control && typeof control.selectionStart === 'number' ? control.selectionStart : null,
+      selectionEnd: control && typeof control.selectionEnd === 'number' ? control.selectionEnd : null
+    };
+  }
+
+  function restoreResourceViewState(state) {
+    if (!state) return;
+    let attempts = 0;
+    function restore() {
+      attempts += 1;
+      resourceList.scrollTop = state.scrollTop || 0;
+      if (state.anchorKey && state.anchorOffset !== null) {
+        const anchor = resourceList.querySelector('[data-resource-key="' + cssEscape(state.anchorKey) + '"]');
+        if (anchor) {
+          const listRect = resourceList.getBoundingClientRect();
+          const anchorRect = anchor.getBoundingClientRect();
+          resourceList.scrollTop += anchorRect.top - listRect.top - state.anchorOffset;
+        }
+      }
+      if (state.focusKey) restoreFocusControl(state);
+      if (attempts < 4) requestAnimationFrame(restore);
+    }
+    requestAnimationFrame(restore);
+  }
+
+  function restoreFocusControl(state) {
+    const selector = '[data-focus-key="' + cssEscape(state.focusKey) + '"]';
+    const control = resourceList.querySelector(selector);
+    if (!control) return;
+    control.focus({ preventScroll: true });
+    if (state.selectionStart !== null && typeof control.setSelectionRange === 'function') {
+      const max = control.value ? control.value.length : 0;
+      control.setSelectionRange(Math.min(state.selectionStart, max), Math.min(state.selectionEnd, max));
+    }
+  }
+
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
+    const slash = String.fromCharCode(92);
+    return String(value).split('').map(function (char) {
+      return /[a-zA-Z0-9_-]/.test(char) ? char : slash + char.charCodeAt(0).toString(16) + ' ';
+    }).join('');
+  }
+
+  function applyReplacements(replacements, viewState) {
+    const valid = replacements
+      .filter(function (item) { return item && item.start <= item.end; })
+      .sort(function (a, b) { return b.start - a.start; });
+    if (!valid.length) return;
+
+    let txt = source.value || '';
+    valid.forEach(function (item) {
+      txt = txt.slice(0, item.start) + item.value + txt.slice(item.end);
+    });
+    source.value = txt;
+    render();
+    restoreResourceViewState(viewState);
+  }
+
+  function updateResourceList(bbcode) {
+    currentCatalog = parseResourceCatalog(bbcode || '');
+    resourceCount.textContent = String(currentCatalog.resources.length);
+
+    if (!currentCatalog.resources.length && !currentCatalog.errors.length) {
+      resourceList.innerHTML = '<div class="resource-empty">未发现资源</div>';
+      return;
+    }
+
+    const tree = buildResourceTree(currentCatalog);
+    resourceList.innerHTML = renderCatalogSummary(currentCatalog) + renderTreeNode(tree, 0);
+  }
+
+  function parseResourceCatalog(bbcode) {
+    const resources = [];
+    const errors = [];
+    const tokensById = Object.create(null);
+    const consumed = [];
+    const prefixStack = [];
+    const suffixStack = [];
+    const lines = splitLinesWithOffsets(bbcode);
+    let tokenSeq = 0;
+    let resourceSeq = 0;
+
+    lines.forEach(function (lineInfo) {
+      const events = [];
+      const line = lineInfo.text;
+      const commentRegex = /(\[comment\s+\/\/\s*)([^\]]*)(\])/gi;
+      let match;
+
+      while ((match = commentRegex.exec(line))) {
+        const token = parseCommentToken(match, lineInfo.offset, tokenSeq++);
+        tokensById[token.id] = token;
+        events.push({ kind: 'comment', index: match.index, token });
+      }
+
+      collectDybgEvents(line, lineInfo, events);
+      collectUrlEvents(line, lineInfo, events);
+      collectImgEvents(line, lineInfo, events);
+      events.sort(function (a, b) {
+        if (a.index !== b.index) return a.index - b.index;
+        return a.kind === 'comment' ? -1 : 1;
+      });
+
+      let currentNameToken = null;
+      events.forEach(function (event) {
+        if (event.kind === 'comment') {
+          const token = event.token;
+          if (token.mode === 'prefixOpen') {
+            prefixStack.push(token);
+          } else if (token.mode === 'prefixClose') {
+            closeStack(prefixStack, token, '前缀目录', errors);
+          } else if (token.mode === 'suffixOpen') {
+            suffixStack.push(token);
+          } else if (token.mode === 'suffixClose') {
+            closeStack(suffixStack, token, '后缀目录', errors);
+          } else if (token.feature === 'text') {
+            currentNameToken = token;
+            const item = extractTextResource(line, lineInfo, token, prefixStack, suffixStack, resourceSeq++);
+            resources.push(item);
+            consumed.push(item.range);
+          } else if (token.feature === 'attr') {
+            currentNameToken = token;
+            const item = extractAttributeResource(line, lineInfo, token, prefixStack, suffixStack, resourceSeq++);
+            resources.push(item);
+            if (item.range) consumed.push(item.range);
+          } else {
+            currentNameToken = token;
+          }
+          return;
+        }
+
+        if (event.kind === 'dybg') {
+          const item = createImageResource(event, currentNameToken, prefixStack, suffixStack, resourceSeq++);
+          resources.push(item);
+          consumed.push(item.range);
+        } else if (event.kind === 'img') {
+          const item = createSimpleResource('image', 'img', event, currentNameToken, prefixStack, suffixStack, resourceSeq++);
+          resources.push(item);
+          consumed.push(item.range);
+        } else if (event.kind === 'url') {
+          const item = createSimpleResource('url', 'url', event, currentNameToken, prefixStack, suffixStack, resourceSeq++);
+          resources.push(item);
+          consumed.push(item.range);
+        }
+      });
+    });
+
+    prefixStack.slice().reverse().forEach(function (token) {
+      errors.push(makeError('前缀目录未闭合：' + token.name, token));
+    });
+    suffixStack.slice().reverse().forEach(function (token) {
+      errors.push(makeError('后缀目录未闭合：' + token.name, token));
+    });
+
+    collectUncategorized(bbcode, consumed, resources, resourceSeq);
+    return { resources, errors, tokensById };
+  }
+
+  function splitLinesWithOffsets(text) {
+    const result = [];
+    const regex = /.*(?:\r?\n|$)/g;
+    let match;
+    while ((match = regex.exec(text))) {
+      if (!match[0] && match.index === text.length) break;
+      const raw = match[0];
+      result.push({ text: raw.replace(/\r?\n$/, ''), offset: match.index });
+    }
+    return result;
+  }
+
+  function parseCommentToken(match, lineOffset, seq) {
+    const raw = match[2];
+    const rawStart = lineOffset + match.index + match[1].length;
+    const leading = raw.match(/^\s*/)[0].length;
+    const trailing = raw.match(/\s*$/)[0].length;
+    const trimmed = raw.slice(leading, raw.length - trailing);
+    const trimmedStart = rawStart + leading;
+    let mode = 'name';
+    let markerStart = '';
+    let markerEnd = '';
+    let feature = '';
+    let nameStartRel = 0;
+    let nameEndRel = trimmed.length;
+
+    if (trimmed.startsWith('++')) {
+      mode = 'prefixOpen';
+      markerStart = '++';
+      nameStartRel = 2;
+    } else if (trimmed.startsWith('--')) {
+      mode = 'prefixClose';
+      markerStart = '--';
+      nameStartRel = 2;
+    } else if (trimmed.endsWith('++')) {
+      mode = 'suffixOpen';
+      markerEnd = '++';
+      nameEndRel = trimmed.length - 2;
+    } else if (trimmed.endsWith('--')) {
+      mode = 'suffixClose';
+      markerEnd = '--';
+      nameEndRel = trimmed.length - 2;
+    }
+
+    const featureIndex = trimmed.indexOf('!', nameStartRel);
+    if (featureIndex !== -1 && featureIndex < nameEndRel) {
+      const featureName = trimmed.slice(featureIndex + 1, nameEndRel).trim();
+      if (featureName === '文本') feature = 'text';
+      if (featureName === '属性') feature = 'attr';
+      if (feature) nameEndRel = featureIndex;
+    }
+
+    while (nameStartRel < nameEndRel && /\s/.test(trimmed[nameStartRel])) nameStartRel += 1;
+    while (nameEndRel > nameStartRel && /\s/.test(trimmed[nameEndRel - 1])) nameEndRel -= 1;
+
+    const name = trimmed.slice(nameStartRel, nameEndRel);
+    return {
+      id: 'c' + seq,
+      mode,
+      markerStart,
+      markerEnd,
+      feature,
+      name,
+      raw,
+      line: lineNumberFromOffset(source.value || '', lineOffset),
+      range: { start: lineOffset + match.index, end: lineOffset + match.index + match[0].length },
+      nameRange: { start: trimmedStart + nameStartRel, end: trimmedStart + nameEndRel }
+    };
+  }
+
+  function closeStack(stack, closeToken, label, errors) {
+    if (!stack.length) {
+      errors.push(makeError(label + '关闭没有对应开始：' + closeToken.name, closeToken));
+      return;
+    }
+    const top = stack[stack.length - 1];
+    if (top.name === closeToken.name) {
+      stack.pop();
+      return;
+    }
+    const foundIndex = stack.map(function (token) { return token.name; }).lastIndexOf(closeToken.name);
+    if (foundIndex === -1) {
+      errors.push(makeError(label + '关闭名称不匹配：' + closeToken.name + '，当前为 ' + top.name, closeToken));
+      return;
+    }
+    errors.push(makeError(label + '交叉关闭：' + closeToken.name + '，当前为 ' + top.name, closeToken));
+    stack.splice(foundIndex, 1);
+  }
+
+  function collectDybgEvents(line, lineInfo, events) {
+    const regex = /dybg\s+([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^\]\s]*)/gi;
+    let match;
+    while ((match = regex.exec(line))) {
+      const fields = [];
+      let searchAt = match.index + match[0].indexOf(match[1]);
+      for (let i = 1; i <= 6; i += 1) {
+        const value = match[i];
+        const relStart = line.indexOf(value, searchAt);
+        const relEnd = relStart + value.length;
+        fields.push({ value, range: { start: lineInfo.offset + relStart, end: lineInfo.offset + relEnd } });
+        searchAt = relEnd + 1;
+      }
+      events.push({
+        kind: 'dybg',
+        index: match.index,
+        range: { start: lineInfo.offset + match.index, end: lineInfo.offset + match.index + match[0].length },
+        fields,
+        line: lineNumberFromOffset(source.value || '', lineInfo.offset)
+      });
+    }
+  }
+
+  function collectUrlEvents(line, lineInfo, events) {
+    const regex = /\[url=([^\]]*)\]/gi;
+    let match;
+    while ((match = regex.exec(line))) {
+      const valueStart = lineInfo.offset + match.index + 5;
+      events.push({
+        kind: 'url',
+        index: match.index,
+        value: match[1],
+        valueRange: { start: valueStart, end: valueStart + match[1].length },
+        range: { start: lineInfo.offset + match.index, end: lineInfo.offset + match.index + match[0].length },
+        line: lineNumberFromOffset(source.value || '', lineInfo.offset)
+      });
+    }
+  }
+
+  function collectImgEvents(line, lineInfo, events) {
+    const regex = /\[img[^\]]*\]([\s\S]*?)\[\/img\]/gi;
+    let match;
+    while ((match = regex.exec(line))) {
+      const openEnd = match[0].indexOf(']') + 1;
+      const valueStart = lineInfo.offset + match.index + openEnd;
+      events.push({
+        kind: 'img',
+        index: match.index,
+        value: match[1],
+        valueRange: { start: valueStart, end: valueStart + match[1].length },
+        range: { start: lineInfo.offset + match.index, end: lineInfo.offset + match.index + match[0].length },
+        line: lineNumberFromOffset(source.value || '', lineInfo.offset)
+      });
+    }
+  }
+
+  function extractTextResource(line, lineInfo, token, prefixStack, suffixStack, seq) {
+    const localStart = token.range.end - lineInfo.offset;
+    const rest = line.slice(localStart);
+    const close = rest.search(/\[\/[^\]]+\]/);
+    const valueStart = token.range.end;
+    const valueEnd = close === -1 ? valueStart : valueStart + close;
+    const item = createBaseResource('text', '文本', token, prefixStack, suffixStack, seq);
+    item.value = (source.value || '').slice(valueStart, valueEnd);
+    item.valueRange = { start: valueStart, end: valueEnd };
+    item.range = { start: token.range.start, end: valueEnd };
+    if (close === -1) item.errors.push('未找到文本后的闭合标签');
+    return item;
+  }
+
+  function extractAttributeResource(line, lineInfo, token, prefixStack, suffixStack, seq) {
+    const localStart = token.range.end - lineInfo.offset;
+    const rest = line.slice(localStart);
+    const match = /\[(?!\/)(?!comment\b)([^\]]*)\]/i.exec(rest);
+    const item = createBaseResource('attr', '属性', token, prefixStack, suffixStack, seq);
+    if (!match) {
+      item.value = '';
+      item.valueRange = { start: token.range.end, end: token.range.end };
+      item.range = { start: token.range.start, end: token.range.end };
+      item.errors.push('未找到 !属性 后面的属性标签');
+      return item;
+    }
+
+    const tagStart = token.range.end + match.index;
+    const contentStart = tagStart + 1;
+    const contentEnd = contentStart + match[1].length;
+    const parts = match[1].trim().split(/\s+/);
+    item.tagName = parts.shift() || '';
+    item.value = match[1];
+    item.valueRange = { start: contentStart, end: contentEnd };
+    item.range = { start: tagStart, end: tagStart + match[0].length };
+    item.attributes = parseAttributes(match[1], contentStart);
+    item.colors = findColorRanges(match[1], contentStart);
+    item.fields = parseKnownAttributes(match[1], contentStart);
+    return item;
+  }
+
+  function parseAttributes(content, contentStart) {
+    const fields = parseKnownAttributes(content, contentStart);
+    return fields.map(function (field) {
+      return { key: field.key, value: field.value, label: field.label, range: field.range };
+    });
+  }
+
+  function parseKnownAttributes(content, contentStart) {
+    const tokens = tokenizeTagContent(content, contentStart);
+    if (!tokens.length) return [];
+    const tagName = tokens[0].value.toLowerCase();
+    const fields = [];
+    let index = 1;
+
+    function addField(key, label, token, kind) {
+      if (!token) return;
+      fields.push({ key, label, value: token.value, range: token.range, kind: kind || 'text' });
+    }
+
+    function addSequence(key, labels, kind) {
+      labels.forEach(function (label) {
+        addField(key, label, tokens[index++], kind);
+      });
+    }
+
+    while (index < tokens.length) {
+      const keyToken = tokens[index++];
+      const key = keyToken.value.toLowerCase();
+      if (tagName === 'fixsize') {
+        if (key === 'width') addSequence(key, ['宽度下限', '宽度上限']);
+        else if (key === 'height') addSequence(key, ['高度']);
+        else if (key === 'background') addSequence(key, ['外背景色', '内背景色'], 'color');
+        else addField(key, keyToken.value, tokens[index++]);
+        continue;
+      }
+
+      if (key === 'filter-drop-shadow') {
+        const valueToken = tokens[index++];
+        if (valueToken) {
+          const parts = valueToken.value.split(';');
+          let cursor = valueToken.range.start;
+          const color = /#[0-9a-f]{6}(?:[0-9a-f]{2})?/i.exec(parts[0] || '');
+          if (color) {
+            const start = valueToken.range.start + color.index;
+            fields.push({ key, label: '阴影颜色', value: color[0], range: { start, end: start + color[0].length }, kind: 'color' });
+          }
+          ['阴影X', '阴影Y', '阴影模糊'].forEach(function (label, labelIndex) {
+            const partIndex = labelIndex + 1;
+            if (parts[partIndex] == null) return;
+            cursor = valueToken.range.start + parts.slice(0, partIndex).join(';').length + 1;
+            const part = parts[partIndex];
+            fields.push({ key, label, value: part, range: { start: cursor, end: cursor + part.length }, kind: 'text' });
+          });
+        }
+      } else if (key === 'dybg') {
+        const valueToken = tokens[index++];
+        if (valueToken) {
+          const parts = valueToken.value.split(';');
+          const labels = ['缩放', '位置X', '位置Y', '活动量X', '活动量Y', '图片链接'];
+          let cursor = valueToken.range.start;
+          parts.forEach(function (part, partIndex) {
+            fields.push({ key, label: labels[partIndex] || ('dybg-' + partIndex), value: part, range: { start: cursor, end: cursor + part.length }, kind: partIndex === 5 ? 'url' : 'text' });
+            cursor += part.length + 1;
+          });
+        }
+      } else if (key === 'background' || key === 'color') {
+        addField(key, key === 'background' ? '背景色' : '文字颜色', tokens[index++], 'color');
+      } else if (key === 'width' || key === 'height' || key === 'border-radius' || key === 'line-height' || key === 'left' || key === 'right' || key === 'top' || key === 'bottom' || key === 'rotate' || key === 'font' || key === 'align') {
+        addField(key, keyToken.value, tokens[index++]);
+      } else {
+        addField(key, keyToken.value, tokens[index++]);
+      }
+    }
+    return fields;
+  }
+
+  function tokenizeTagContent(content, contentStart) {
+    const tokens = [];
+    const regex = /\S+/g;
+    let match;
+    while ((match = regex.exec(content))) {
+      tokens.push({ value: match[0], range: { start: contentStart + match.index, end: contentStart + match.index + match[0].length } });
+    }
+    return tokens;
+  }
+
+  function findColorRanges(content, contentStart) {
+    const colors = [];
+    const regex = /#([0-9a-f]{6})([0-9a-f]{2})?/gi;
+    let match;
+    while ((match = regex.exec(content))) {
+      colors.push({
+        value: '#' + match[1],
+        alpha: match[2] || '',
+        range: { start: contentStart + match.index, end: contentStart + match.index + match[0].length }
+      });
+    }
+    return colors;
+  }
+
+  function createImageResource(event, nameToken, prefixStack, suffixStack, seq) {
+    const item = createBaseResource('image', 'dybg', nameToken, prefixStack, suffixStack, seq);
+    item.params = [
+      { label: '缩放', field: event.fields[0] },
+      { label: '位置X', field: event.fields[1] },
+      { label: '位置Y', field: event.fields[2] },
+      { label: '活动量X', field: event.fields[3] },
+      { label: '活动量Y', field: event.fields[4] }
+    ];
+    item.url = event.fields[5].value;
+    item.urlRange = event.fields[5].range;
+    item.value = item.url;
+    item.range = event.range;
+    item.line = event.line;
+    return item;
+  }
+
+  function createSimpleResource(type, sourceKind, event, nameToken, prefixStack, suffixStack, seq) {
+    const item = createBaseResource(type, sourceKind, nameToken, prefixStack, suffixStack, seq);
+    item.value = event.value;
+    item.url = event.value;
+    item.valueRange = event.valueRange;
+    item.urlRange = event.valueRange;
+    item.range = event.range;
+    item.line = event.line;
+    return item;
+  }
+
+  function createBaseResource(type, sourceKind, nameToken, prefixStack, suffixStack, seq) {
+    const segmentTokens = [];
+    const prefixParts = prefixStack.map(function (token) {
+      segmentTokens.push(token.id);
+      return token.name;
+    });
+    const suffixTokens = suffixStack.slice().reverse();
+    const suffixParts = suffixTokens.map(function (token) {
+      segmentTokens.push(token.id);
+      return token.name;
+    });
+    const hasName = Boolean(nameToken && nameToken.name);
+    const name = hasName ? nameToken.name : UNCATEGORIZED;
+    const parts = hasName ? prefixParts.concat([name], suffixParts) : [UNCATEGORIZED];
+    const pathTokenIds = hasName ? prefixStack.map(function (token) { return token.id; }).concat([nameToken.id], suffixTokens.map(function (token) { return token.id; })) : [];
+    return {
+      id: 'r' + seq,
+      type,
+      sourceKind,
+      name,
+      nameTokenId: nameToken ? nameToken.id : '',
+      pathParts: parts,
+      pathTokenIds,
+      path: '\\' + parts.join('\\'),
+      line: nameToken ? nameToken.line : 0,
+      errors: []
+    };
+  }
+
+  function collectUncategorized(bbcode, consumed, resources, resourceSeq) {
+    const ranges = consumed.slice();
+    const addIfFree = function (type, sourceKind, start, end, value, valueStart, valueEnd) {
+      if (ranges.some(function (range) { return start < range.end && end > range.start; })) return;
+      const item = {
+        id: 'r' + resourceSeq++,
+        type,
+        sourceKind,
+        name: UNCATEGORIZED,
+        pathParts: [UNCATEGORIZED],
+        pathTokenIds: [],
+        path: '\\' + UNCATEGORIZED,
+        line: lineNumberFromOffset(bbcode, start),
+        value,
+        url: value,
+        valueRange: { start: valueStart, end: valueEnd },
+        urlRange: { start: valueStart, end: valueEnd },
+        range: { start, end },
+        errors: []
+      };
+      resources.push(item);
+      ranges.push(item.range);
+    };
+
+    let match;
+    const dybgTag = /dybg\s+([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^\]\s]*)/gi;
+    while ((match = dybgTag.exec(bbcode))) {
+      const fields = [];
+      let searchAt = match.index + match[0].indexOf(match[1]);
+      for (let i = 1; i <= 6; i += 1) {
+        const value = match[i];
+        const relStart = bbcode.indexOf(value, searchAt);
+        const relEnd = relStart + value.length;
+        fields.push({ value, range: { start: relStart, end: relEnd } });
+        searchAt = relEnd + 1;
+      }
+      if (!ranges.some(function (range) { return match.index < range.end && match.index + match[0].length > range.start; })) {
+        const item = {
+          id: 'r' + resourceSeq++,
+          type: 'image',
+          sourceKind: 'dybg',
+          name: UNCATEGORIZED,
+          pathParts: [UNCATEGORIZED],
+          pathTokenIds: [],
+          path: '\\' + UNCATEGORIZED,
+          line: lineNumberFromOffset(bbcode, match.index),
+          params: [
+            { label: '缩放', field: fields[0] },
+            { label: '位置X', field: fields[1] },
+            { label: '位置Y', field: fields[2] },
+            { label: '活动量X', field: fields[3] },
+            { label: '活动量Y', field: fields[4] }
+          ],
+          url: fields[5].value,
+          urlRange: fields[5].range,
+          value: fields[5].value,
+          range: { start: match.index, end: match.index + match[0].length },
+          errors: []
+        };
+        resources.push(item);
+        ranges.push(item.range);
+      }
+    }
+
+    const imgTag = /\[img[^\]]*\]([\s\S]*?)\[\/img\]/gi;
+    while ((match = imgTag.exec(bbcode))) {
+      const openEnd = match[0].indexOf(']') + 1;
+      addIfFree('image', 'img', match.index, match.index + match[0].length, match[1], match.index + openEnd, match.index + openEnd + match[1].length);
+    }
+
+    const urlTag = /\[url=([^\]]*)\]/gi;
+    while ((match = urlTag.exec(bbcode))) {
+      addIfFree('url', 'url', match.index, match.index + match[0].length, match[1], match.index + 5, match.index + 5 + match[1].length);
+    }
+  }
+
+  function makeError(message, token) {
+    return {
+      id: 'e' + token.id,
+      message,
+      line: token.line,
+      pathParts: [UNCATEGORIZED],
+      path: '\\' + UNCATEGORIZED
+    };
+  }
+
+  function buildResourceTree(catalog) {
+    const root = { name: '', children: Object.create(null), resources: [], tokenIds: new Set(), errors: [] };
+    catalog.resources.forEach(function (item) {
+      let node = root;
+      item.pathParts.forEach(function (part, index) {
+        if (!node.children[part]) node.children[part] = { name: part, children: Object.create(null), resources: [], tokenIds: new Set(), errors: [] };
+        node = node.children[part];
+        const tokenId = item.pathTokenIds[index];
+        if (tokenId) node.tokenIds.add(tokenId);
+      });
+      node.resources.push(item);
+    });
+    catalog.errors.forEach(function (error) {
+      root.errors.push(error);
+    });
+    return root;
+  }
+
+  function renderCatalogSummary(catalog) {
+    const errorHtml = catalog.errors.length
+      ? '<div class="resource-errors">' + catalog.errors.map(function (error) {
+        return '<div class="resource-error">第 ' + escapeHtml(error.line) + ' 行：' + escapeHtml(error.message) + '</div>';
+      }).join('') + '</div>'
+      : '';
+    return '<div class="catalog-summary">资源 ' + catalog.resources.length + ' 项，提示 ' + catalog.errors.length + ' 项</div>' + errorHtml;
+  }
+
+  function renderTreeNode(node, depth) {
+    const names = Object.keys(node.children).sort(naturalCompare);
+    const childHtml = names.map(function (name) {
+      const child = node.children[name];
+      const tokenIds = Array.from(child.tokenIds);
+      const rename = tokenIds.length
+        ? '<input class="dir-name-input" data-edit-kind="comment-name-bulk" data-focus-key="dir:' + escapeHtml(tokenIds.join(',')) + '" data-token-ids="' + escapeHtml(tokenIds.join(',')) + '" value="' + escapeHtml(child.name) + '" title="修改关联 comment 名称">'
+        : '<span class="dir-name-static">' + escapeHtml(child.name) + '</span>';
+      return '<details class="catalog-dir" open style="--depth:' + depth + '"><summary>' + rename + '<span class="dir-count">' + countResources(child) + '</span></summary>' + renderTreeNode(child, depth + 1) + '</details>';
+    }).join('');
+    const resourceHtml = node.resources.map(renderResourceItem).join('');
+    return '<div class="catalog-node">' + childHtml + resourceHtml + '</div>';
+  }
+
+  function renderResourceItem(item) {
+    const typeLabel = item.type === 'image' ? '图片' : item.type === 'url' ? 'URL' : item.type === 'text' ? '文本' : '属性';
+    const warnings = item.errors && item.errors.length ? '<div class="resource-item-errors">' + item.errors.map(escapeHtml).join('<br>') + '</div>' : '';
+    return '<article class="catalog-resource resource-kind-' + escapeHtml(item.type) + '" data-resource-key="' + escapeHtml(resourceKey(item)) + '">' +
+      '<header><span class="resource-type resource-type-' + escapeHtml(item.type) + '">' + typeLabel + '</span>' +
+      '<span class="resource-source">' + escapeHtml(item.sourceKind) + '</span>' +
+      '<span class="resource-line">L' + escapeHtml(item.line || '') + '</span></header>' +
+      '<div class="resource-path" title="' + escapeHtml(item.path) + '">' + escapeHtml(item.path) + '</div>' +
+      renderResourceEditor(item) + warnings +
+      '</article>';
+  }
+
+  function resourceKey(item) {
+    return item.type + ':' + item.sourceKind + ':' + item.line + ':' + item.path;
+  }
+
+  function renderResourceEditor(item) {
+    if (item.type === 'image') return renderImageEditor(item);
+    if (item.type === 'url') return renderInputField('链接', item.value, item.valueRange, 'url', 'resource-url-input');
+    if (item.type === 'text') return renderTextareaField('文本', item.value, item.valueRange);
+    if (item.type === 'attr') return renderAttributeEditor(item);
+    return '';
+  }
+
+  function renderImageEditor(item) {
+    const fullUrl = toFullImageUrl(item.url || '');
+    const thumb = item.url ? '<a class="resource-thumb-link" data-preview-url="' + escapeHtml(fullUrl) + '" href="' + escapeHtml(fullUrl) + '" target="_blank" rel="noreferrer"><img class="resource-thumb" src="' + escapeHtml(fullUrl) + '" alt=""></a>' : '<span class="empty-url">空图片链接</span>';
+    const params = item.params ? '<div class="dybg-param-grid">' + item.params.map(function (param) {
+      return renderInputField(param.label, param.field.value, param.field.range, 'text');
+    }).join('') + '</div>' : '';
+    return '<div class="image-editor">' + thumb + '<div class="resource-fields">' + renderInputField('图片链接', item.url || '', item.urlRange, 'text', 'resource-url-input') + params + '</div></div>';
+  }
+
+  function renderAttributeEditor(item) {
+    const fields = item.fields && item.fields.length
+      ? '<div class="attr-list">' + item.fields.map(renderAttributeField).join('') + '</div>'
+      : '<div class="attr-list empty-url">无额外属性</div>';
+    return '<div class="resource-fields"><label class="attr-raw-field">标签属性 <textarea data-edit-kind="range" data-start="' + item.valueRange.start + '" data-end="' + item.valueRange.end + '">' + escapeHtml(item.value) + '</textarea></label>' + fields + '</div>';
+  }
+
+  function renderAttributeField(field) {
+    if (field.kind === 'color') return renderColorField(field.label, field.value, field.range);
+    return renderInputField(field.label, field.value, field.range, field.kind === 'url' ? 'url' : 'text', field.kind === 'url' ? 'resource-url-input' : '');
+  }
+
+  function renderColorField(label, value, range) {
+    const parsed = parseColorValue(value || '');
+    return '<label class="color-field">' + escapeHtml(label) + '<span class="color-edit"><input class="color-swatch" type="color" data-edit-kind="color" data-focus-key="range:' + range.start + ':' + range.end + ':color" data-start="' + range.start + '" data-end="' + range.end + '" data-alpha="' + escapeHtml(parsed.alpha) + '" value="' + escapeHtml(parsed.hex) + '"><input class="color-hex-input" data-edit-kind="range" data-color-alpha="1" data-focus-key="range:' + range.start + ':' + range.end + ':hex" data-start="' + range.start + '" data-end="' + range.end + '" value="' + escapeHtml(parsed.full) + '" maxlength="9"></span></label>';
+  }
+
+  function parseColorValue(value) {
+    const match = String(value || '').match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
+    if (!match) return { hex: '#000000', alpha: '', full: String(value || '') };
+    return { hex: '#' + match[1], alpha: match[2] || '', full: '#' + match[1] + (match[2] || '') };
+  }
+
+  function normalizeAlpha(value) {
+    const match = String(value || '').match(/[0-9a-f]{2}$/i);
+    return match ? match[0] : '';
+  }
+
+  function renderInputField(label, value, range, type, className) {
+    return '<label>' + escapeHtml(label) + '<input class="' + escapeHtml(className || '') + '" type="' + escapeHtml(type || 'text') + '" data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':input" data-start="' + range.start + '" data-end="' + range.end + '" value="' + escapeHtml(value || '') + '"></label>';
+  }
+
+  function renderTextareaField(label, value, range) {
+    return '<label class="text-resource-field">' + escapeHtml(label) + '<textarea data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':textarea" data-start="' + range.start + '" data-end="' + range.end + '">' + escapeHtml(value || '') + '</textarea></label>';
+  }
+
+  function countResources(node) {
+    return node.resources.length + Object.keys(node.children).reduce(function (sum, key) {
+      return sum + countResources(node.children[key]);
+    }, 0);
+  }
+
+  function naturalCompare(a, b) {
+    return a.localeCompare(b, 'zh-Hans-CN', { numeric: true });
+  }
+
+  function toFullImageUrl(value) {
+    if (!value) return '';
+    if (/^https?:\/\//i.test(value)) return value;
+    if (value.startsWith('./')) return ATTACH_BASE + '/' + value.slice(2);
+    if (value.startsWith('/attachments/')) return 'https://img.nga.178.com' + value;
+    return value;
+  }
+
+  function lineNumberFromOffset(text, offset) {
+    return text.slice(0, offset).split(/\r?\n/).length;
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  loadSampleButton.addEventListener('click', loadSample);
+  renderButton.addEventListener('click', render);
+  loginNgaButton.addEventListener('click', openLogin);
+  loadPostButton.addEventListener('click', loadPostFromUrl);
+  savePostButton.addEventListener('click', saveCurrentPost);
+  source.addEventListener('keydown', function (event) {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') render();
+  });
+
+  init().catch(function (error) {
+    setStatus('初始化失败：' + error.message, true);
+  });
+})();

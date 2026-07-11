@@ -1,0 +1,13 @@
+﻿{
+  "name": "nga-bbcode-preview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Electron GUI for previewing NGA BBCode.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "latest"
+  }
+}

@@ -1,0 +1,64 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: data: about:; img-src 'self' file: data: about: http: https:; style-src 'self' 'unsafe-inline' file:; script-src 'self' 'unsafe-inline' file:; connect-src 'self' file:;">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NGA BBCode Preview</title>
+  <link rel="stylesheet" href="../img4.nga.178.com/ngabbs/nga_classic/css_default.css">
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="preview-pane">
+      <div class="preview-toolbar">
+        <strong>预览</strong>
+        <span id="previewStatus">使用 Chromium 渲染</span>
+      </div>
+      <div id="previewHost" class="preview-host">
+        <div id="preview" class="ubbcode preview-content"></div>
+      </div>
+    </section>
+
+    <div class="main-resizer" title="拖动调整预览高度"></div>
+
+    <section class="workbench-pane">
+      <section class="editor-pane">
+        <header class="toolbar">
+          <div>
+            <h1>NGA BBCode Preview</h1>
+            <p id="pathInfo">Electron local preview</p>
+          </div>
+          <div class="actions editor-actions">
+            <button id="loadSample" type="button">加载示例</button>
+            <button id="render" type="button">渲染/刷新</button>
+            <button id="loginNga" type="button">登录 NGA</button>
+            <input id="postUrl" type="url" placeholder="帖子链接 read.php?tid=...">
+            <button id="loadPost" type="button">导入帖子</button>
+            <button id="savePost" type="button">发布修改</button>
+            <span id="postStatus" class="post-status">未导入帖子</span>
+          </div>
+        </header>
+        <textarea id="source" spellcheck="false" placeholder="在这里输入 NGA BBCode"></textarea>
+        <footer id="status" class="status">准备就绪</footer>
+      </section>
+
+      <section class="resource-pane">
+        <section class="resource-panel">
+          <header class="resource-panel-title">图片与链接清单 <span id="resourceCount">0</span></header>
+          <div id="resourceList" class="resource-list"></div>
+        </section>
+      </section>
+    </section>
+  </main>
+  <div id="resourceHoverPreview" class="resource-hover-preview" aria-hidden="true"><img alt=""></div>
+
+  <script src="../img4.nga.178.com/common_res/js_commonLib.js"></script>
+  <script src="../img4.nga.178.com/ngabbs/nga_classic/js_color.js"></script>
+  <script src="./nga-shim.js"></script>
+  <script src="../img4.nga.178.com/common_res/js_commonui.js"></script>
+  <script src="../img4.nga.178.com/common_res/js_bbscode_core.js"></script>
+  <script src="../img4.nga.178.com/ngabbs/nga_classic/js_bbscode_smiles.js"></script>
+  <script src="./renderer.js"></script>
+</body>
+</html>
