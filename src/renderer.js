@@ -24,6 +24,7 @@
   const appShell = document.querySelector('.app-shell');
   const mainResizer = document.querySelector('.main-resizer');
   const workbenchPane = document.querySelector('.workbench-pane');
+  const workbenchSeparator = document.querySelector('.workbench-separator');
 
   let paths = null;
   let currentCatalog = null;
@@ -33,9 +34,9 @@
 
   function setStatus(message, isError) {
     status.textContent = message;
-    status.style.color = isError ? '#b63f32' : '#58697b';
+    status.classList.toggle('is-error', Boolean(isError));
     previewStatus.textContent = message;
-    previewStatus.style.color = isError ? '#b63f32' : '#58697b';
+    previewStatus.classList.toggle('is-error', Boolean(isError));
   }
 
   async function init() {
@@ -182,31 +183,60 @@
   }
 
   function initWorkbenchResize() {
-    if (!workbenchPane) return;
-    let dragging = false;
+    if (!workbenchPane || !workbenchSeparator) return;
+    const gutterWidth = 8;
+    const editorMinWidth = 320;
+    const resourceMinWidth = 360;
+    const desktopMedia = window.matchMedia('(min-width: 1001px)');
+    let pointerId = null;
+    let editorRatio = 0.58;
 
-    workbenchPane.addEventListener('mousedown', function (event) {
-      const rect = workbenchPane.getBoundingClientRect();
-      const current = getComputedStyle(workbenchPane).gridTemplateColumns.split(' ');
-      const gutterLeft = parseFloat(current[0]) || rect.width * 0.58;
-      if (Math.abs(event.clientX - rect.left - gutterLeft) > 8) return;
-      dragging = true;
+    function clampEditorWidth(width, availableWidth) {
+      const maxWidth = Math.max(editorMinWidth, availableWidth - resourceMinWidth);
+      return Math.min(Math.max(width, editorMinWidth), maxWidth);
+    }
+
+    function applyRatio() {
+      if (!desktopMedia.matches) {
+        cleanupDrag();
+        workbenchPane.style.removeProperty('grid-template-columns');
+        return;
+      }
+      const availableWidth = Math.max(0, workbenchPane.getBoundingClientRect().width - gutterWidth);
+      const editorWidth = clampEditorWidth(availableWidth * editorRatio, availableWidth);
+      workbenchPane.style.gridTemplateColumns = editorWidth + 'px ' + gutterWidth + 'px minmax(' + resourceMinWidth + 'px, 1fr)';
+    }
+
+    function cleanupDrag(event) {
+      if (event?.pointerId != null && pointerId !== null && event.pointerId !== pointerId) return;
+      pointerId = null;
+      document.body.classList.remove('resizing-workbench');
+    }
+
+    workbenchSeparator.addEventListener('pointerdown', function (event) {
+      if (!desktopMedia.matches || (event.button !== undefined && event.button !== 0)) return;
+      pointerId = event.pointerId;
+      workbenchSeparator.setPointerCapture(pointerId);
       document.body.classList.add('resizing-workbench');
       event.preventDefault();
     });
 
-    window.addEventListener('mousemove', function (event) {
-      if (!dragging) return;
+    workbenchSeparator.addEventListener('pointermove', function (event) {
+      if (event.pointerId !== pointerId || !desktopMedia.matches) return;
       const rect = workbenchPane.getBoundingClientRect();
-      const left = Math.min(Math.max(event.clientX - rect.left, 280), rect.width - 320);
-      workbenchPane.style.gridTemplateColumns = left + 'px 8px minmax(320px, 1fr)';
+      const availableWidth = Math.max(0, rect.width - gutterWidth);
+      const editorWidth = clampEditorWidth(event.clientX - rect.left, availableWidth);
+      editorRatio = availableWidth ? editorWidth / availableWidth : editorRatio;
+      workbenchPane.style.gridTemplateColumns = editorWidth + 'px ' + gutterWidth + 'px minmax(' + resourceMinWidth + 'px, 1fr)';
     });
 
-    window.addEventListener('mouseup', function () {
-      if (!dragging) return;
-      dragging = false;
-      document.body.classList.remove('resizing-workbench');
-    });
+    workbenchSeparator.addEventListener('pointerup', cleanupDrag);
+    workbenchSeparator.addEventListener('pointercancel', cleanupDrag);
+    workbenchSeparator.addEventListener('lostpointercapture', cleanupDrag);
+    window.addEventListener('blur', cleanupDrag);
+    window.addEventListener('resize', applyRatio);
+    desktopMedia.addEventListener('change', applyRatio);
+    applyRatio();
   }
 
   function initResourceHoverPreview() {
@@ -1038,7 +1068,8 @@
     catalog.resources.forEach(function (item, resourceIndex) {
       let node = root;
       item.pathParts.forEach(function (part, index) {
-        const segmentKey = (item.pathKeys && item.pathKeys[index]) || ('name:' + part);
+        const isSystemUncategorized = item.pathKeys && item.pathKeys[index] === SYSTEM_UNCATEGORIZED_KEY;
+        const segmentKey = isSystemUncategorized ? SYSTEM_UNCATEGORIZED_KEY : ('name:' + part);
         const fullKey = (node.key ? node.key + '/' : '') + segmentKey;
         if (!node.childMap[segmentKey]) {
           const child = { key: fullKey, name: part, children: [], childMap: Object.create(null), resources: [], tokenIds: new Set(), errors: [], sourceOrder: resourceIndex, isSystemUncategorized: fullKey === SYSTEM_UNCATEGORIZED_KEY };
