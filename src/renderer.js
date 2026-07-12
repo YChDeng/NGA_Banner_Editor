@@ -242,31 +242,43 @@
   function initResourceHoverPreview() {
     if (!resourceList || !resourceHoverPreview) return;
     const previewImage = resourceHoverPreview.querySelector('img');
+    let activeLink = null;
+
+    function hidePreview() {
+      activeLink = null;
+      resourceHoverPreview.classList.remove('is-visible');
+      previewImage.removeAttribute('src');
+    }
+
+    previewImage.addEventListener('load', function () {
+      if (!activeLink || !previewImage.naturalWidth || !previewImage.naturalHeight) return;
+      resourceHoverPreview.classList.add('is-visible');
+      positionResourceHoverPreview(activeLink);
+    });
+
+    previewImage.addEventListener('error', hidePreview);
 
     resourceList.addEventListener('mouseover', function (event) {
       const link = event.target.closest('.resource-thumb-link');
-      if (!link || !resourceList.contains(link)) return;
+      if (!link || !resourceList.contains(link) || link === activeLink) return;
+      activeLink = link;
+      resourceHoverPreview.classList.remove('is-visible');
       previewImage.src = link.dataset.previewUrl || '';
-      resourceHoverPreview.classList.add('is-visible');
-      positionResourceHoverPreview(link);
     });
 
     resourceList.addEventListener('mousemove', function (event) {
       const link = event.target.closest('.resource-thumb-link');
-      if (!link || !resourceList.contains(link)) return;
+      if (!link || !resourceList.contains(link) || !resourceHoverPreview.classList.contains('is-visible')) return;
       positionResourceHoverPreview(link);
     });
 
     resourceList.addEventListener('mouseout', function (event) {
       const link = event.target.closest('.resource-thumb-link');
       if (!link || link.contains(event.relatedTarget)) return;
-      resourceHoverPreview.classList.remove('is-visible');
-      previewImage.removeAttribute('src');
+      hidePreview();
     });
 
-    window.addEventListener('resize', function () {
-      resourceHoverPreview.classList.remove('is-visible');
-    });
+    window.addEventListener('resize', hidePreview);
   }
 
   function positionResourceHoverPreview(anchor) {
@@ -1153,7 +1165,7 @@
 
   function renderImageEditor(item) {
     const fullUrl = toFullImageUrl(item.url || '');
-    const thumb = item.url ? '<a class="resource-thumb-link" data-preview-url="' + escapeHtml(fullUrl) + '" href="' + escapeHtml(fullUrl) + '" target="_blank" rel="noreferrer"><img class="resource-thumb" src="' + escapeHtml(fullUrl) + '" alt=""></a>' : '<span class="empty-url">空图片链接</span>';
+    const thumb = item.url ? '<a class="resource-thumb-link" data-preview-url="' + escapeHtml(fullUrl) + '" href="' + escapeHtml(fullUrl) + '" target="_blank" rel="noreferrer"><img class="resource-thumb" src="' + escapeHtml(fullUrl) + '" alt=""></a>' : '<span class="resource-thumb-empty" role="img" aria-label="图片链接为空"><span class="resource-thumb-empty-marker" aria-hidden="true">×</span></span>';
     const params = item.params ? '<div class="dybg-param-grid">' + item.params.map(function (param) {
       return renderInputField(param.label, param.field.value, param.field.range, 'text');
     }).join('') + '</div>' : '';
