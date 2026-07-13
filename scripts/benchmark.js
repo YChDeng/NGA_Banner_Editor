@@ -1,0 +1,5 @@
+const fs=require('node:fs'),vm=require('node:vm'),{performance}=require('node:perf_hooks');
+let src=fs.readFileSync('src/tokenizer.js','utf8').replace(/export const /g,'const ').replace(/export function /g,'function ');src+='\nmodule.exports={tokenizeBbcode,resolveHighlightRanges};';const box={module:{exports:{}}};vm.runInNewContext(src,box);const {tokenizeBbcode,resolveHighlightRanges}=box.module.exports;
+const real=fs.readFileSync('tmp/test.bbcode','utf8'),line='[comment // 图层][style color #ffaa00 width 10px dybg 100%;0%;0%;0%;0%;./x.webp][url=https://x.test]x[/url][/style]';
+function run(label,text){for(let i=0;i<3;i++){const t=tokenizeBbcode(text);resolveHighlightRanges(text.length,t)}const times=[];let tokens;for(let i=0;i<10;i++){const a=performance.now();tokens=tokenizeBbcode(text);resolveHighlightRanges(text.length,tokens);times.push(performance.now()-a)}times.sort((a,b)=>a-b);console.log(`${label.padEnd(8)} ${times[5].toFixed(2)}ms tokens=${tokens.length} chars=${text.length}`)}
+run('real',real);for(const n of [75,150,300])run(String(n),Array(n).fill(line).join('\n'));

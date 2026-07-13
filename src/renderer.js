@@ -1,3 +1,7 @@
+import {createEditorAdapter} from './editor-adapter.js';
+import {hashText, validateReplacements, catalogDiagnosticRanges, resourceAnchorKey} from './catalog-guards.js';
+import {buildLineIndex,lineNumberAt,mergeIntervals,overlapsIntervals,catalogFingerprints,cacheResourceCounts} from './catalog-helpers.js';
+import {measurePerf} from './performance.js';
 ;(function () {
   const ATTACH_BASE = 'https://img.nga.178.com/attachments';
   const UNCATEGORIZED = '未分类';
@@ -5,7 +9,9 @@
   const SORT_STORAGE_KEY = 'resourceSortMode';
   const SORT_MODES = new Set(['default', 'name-asc', 'name-desc']);
 
-  const source = document.getElementById('source');
+  const sourceHost = document.getElementById('source');
+  let editor;
+  const sourceEditor = document.querySelector('.source-editor');
   const preview = document.getElementById('preview');
   const status = document.getElementById('status');
   const previewStatus = document.getElementById('previewStatus');
@@ -31,6 +37,49 @@
   let currentPostContext = null;
   let resourceSortMode = readSortMode();
   const directoryOpenState = new Map();
+  const BB_TAGS = new Set(('b i u s del collapse quote code url img flash audio video color size font align list li table tr td th style fixsize span div ' +
+    'h hr br crypt random dice pid tid uid mention attach album emoticon left center right justify comment').split(/\s+/));
+  const STYLE_ATTRIBUTES = new Set(('color background font align width height line-height border-radius left right top bottom rotate ' +
+    'filter-drop-shadow dybg display position margin padding opacity transform z-index').split(/\s+/));
+  let catalogTimer = 0;
+  let previewTimer = 0;
+  let updateVersion = 0;
+  let selectedResourceId = '';
+  let suppressScheduledChange = false;
+  let catalogFingerprintsCurrent = null;
+  let previewFingerprint = '';
+  let previewStaging = null;
+
+  function cancelPendingUpdates() {
+    updateVersion += 1;
+    clearTimeout(catalogTimer); clearTimeout(previewTimer);
+    catalogTimer = 0; previewTimer = 0;
+  }
+
+  function setSourceValue(value) {
+    suppressScheduledChange = true;
+    editor.setText(value == null ? '' : String(value));
+    suppressScheduledChange = false;
+  }
+
+  function scheduleLiveUpdates(update) {
+    if (suppressScheduledChange) { suppressScheduledChange = false; return; }
+    const version = ++updateVersion;
+    const text = update?.state?.doc?.toString?.() ?? editor.getText();
+    clearTimeout(catalogTimer); clearTimeout(previewTimer);
+    setStatus('正在更新资源与预览…');
+    catalogTimer = setTimeout(function () { if (version === updateVersion) updateResourceList(text); }, 120);
+    previewTimer = setTimeout(function () { if (version === updateVersion) render(false, {version, text}); }, 400);
+  }
+
+  function syncResourceFromSelection(selection) {
+    if (!currentCatalog) return;
+    const candidates = currentCatalog.resources.filter(function (r) { return selection.from === selection.to ? selection.from >= r.range.start && selection.from <= r.range.end : selection.from < r.range.end && selection.to > r.range.start; }).sort(function(a,b){return (a.range.end-a.range.start)-(b.range.end-b.range.start)});
+    const id = candidates[0] && candidates[0].stableId;
+    if (!id || id === selectedResourceId) return; selectedResourceId=id;
+    resourceList.querySelectorAll('.is-active').forEach(function(el){el.classList.remove('is-active')});
+    const card=resourceList.querySelector('[data-resource-id="'+cssEscape(id)+'"]'); if(card){card.classList.add('is-active'); let p=card.parentElement.closest('details'); while(p){p.open=true;p=p.parentElement.closest('details')}}
+  }
 
   function setStatus(message, isError) {
     status.textContent = message;
@@ -45,6 +94,7 @@
     initResourceHoverPreview();
     initResourceEditing();
     initResourceSorting();
+    editor = createEditorAdapter(sourceHost, { onChange: scheduleLiveUpdates, onSelectionChange: syncResourceFromSelection, onModEnter: render });
     await refreshAuthStatus();
     paths = await window.bbcodePreview.getPaths();
     window.__NGA_REMOTE_ATTACH_BASE = ATTACH_BASE;
@@ -86,10 +136,10 @@
     try {
       const result = await window.bbcodePreview.loadPost(postUrl);
       currentPostContext = result.context;
-      source.value = currentPostContext.content || '';
+      setSourceValue(currentPostContext.content || '');
       postStatus.textContent = '已导入 tid=' + currentPostContext.tid + ', pid=' + currentPostContext.pid;
       setStatus('已导入帖子：' + (currentPostContext.subject || '(无标题)'));
-      render();
+      renderImmediately();
     } catch (error) {
       setStatus('导入帖子失败：' + error.message, true);
     }
@@ -103,7 +153,7 @@
     if (!confirm('确认发布当前 BBCode 到已导入的帖子？')) return;
     setStatus('正在发布修改...');
     try {
-      const result = await window.bbcodePreview.savePost(source.value || '');
+      const result = await window.bbcodePreview.savePost(editor.getText());
       setStatus(result.message || '发布成功');
       postStatus.textContent = '发布成功 tid=' + currentPostContext.tid;
     } catch (error) {
@@ -113,49 +163,41 @@
 
   async function loadSample() {
     try {
-      source.value = await window.bbcodePreview.readSample();
+      setSourceValue(await window.bbcodePreview.readSample());
       setStatus('已加载示例 BBCode');
-      render();
+      renderImmediately();
     } catch (error) {
       setStatus('加载示例失败：' + error.message, true);
     }
   }
 
-  function render() {
-    const txt = source.value || '';
-    preview.innerHTML = '';
-    updateResourceList(txt);
-
-    try {
-      renderWithOriginalParser(txt);
-      setStatus('已使用 NGA 原解析器渲染');
-    } catch (error) {
-      console.error('NGA parser failed.', error);
-      preview.innerHTML = '<div class="render-error"></div>';
-      preview.firstChild.textContent = error.stack || error.message;
-      setStatus('NGA 原解析器失败：' + error.message, true);
-    }
+  function renderImmediately(viewState) {
+    cancelPendingUpdates();
+    render(true, { force: true, version: updateVersion, text: editor.getText() });
+    restoreResourceViewState(viewState);
   }
 
-  function renderWithOriginalParser(txt) {
-    if (!window.ubbcode || typeof window.ubbcode.bbsCode !== 'function') {
-      throw new Error('ubbcode.bbsCode 不可用');
-    }
+  function render(rebuildCatalog, scheduled) {
+    const txt = scheduled?.text ?? editor.getText();
+    const version = scheduled?.version ?? updateVersion;
+    if (version !== updateVersion) return;
+    if (rebuildCatalog !== false) updateResourceList(txt);
+    const fingerprint = hashText(txt);
+    if (!scheduled?.force && fingerprint === previewFingerprint) { setStatus('资源已更新，预览内容未变化'); return; }
+    try {
+      if (!previewStaging) { previewStaging=document.createElement('div'); previewStaging.className='ubbcode preview-content preview-staging'; previewStaging.hidden=true; previewStaging.setAttribute('aria-hidden','true'); preview.parentNode.appendChild(previewStaging); }
+      previewStaging.replaceChildren();
+      renderWithOriginalParser(txt, previewStaging);
+      if (version !== updateVersion) { previewStaging.replaceChildren(); return; }
+      preview.replaceChildren(...Array.from(previewStaging.childNodes)); previewFingerprint=fingerprint;
+      const hints=currentCatalog?.errors.length; setStatus(hints?'预览已更新，资源提示 '+hints+' 项':'已使用 NGA 原解析器渲染',Boolean(hints));
+    } catch(error) { previewStaging?.replaceChildren(); const node=document.createElement('div');node.className='render-error';node.textContent=error.stack||error.message;preview.replaceChildren(node);setStatus('NGA 原解析器失败：'+error.message,true); }
+  }
+  function renderWithOriginalParser(txt, target) {
+    if (!window.ubbcode || typeof window.ubbcode.bbsCode !== 'function') throw new Error('ubbcode.bbsCode 不可用');
     if (window.__NGA_PATCH_UBBCODE_ATTACH) window.__NGA_PATCH_UBBCODE_ATTACH();
-
-    const args = {
-      c: preview,
-      txt: txt.replace(/\r?\n/g, '<br/>'),
-      opt: 4 | 1 | 16 | 32768,
-      noImg: 0,
-      fId: 0,
-      inTopImg: [0, 0],
-      isSig: 0,
-      isLesser: true,
-      maxWidthO: document.getElementById('previewHost')
-    };
-
-    window.ubbcode.bbsCode(args);
+    const args={c:target,txt:txt.replace(/\r?\n/g,'<br/>'),opt:4|1|16|32768,noImg:0,fId:0,inTopImg:[0,0],isSig:0,isLesser:true,maxWidthO:document.getElementById('previewHost')};
+    measurePerf('nga.bbsCode',()=>window.ubbcode.bbsCode(args),{length:txt.length});
   }
 
   function initMainResize() {
@@ -318,7 +360,7 @@
         const start = Number(action.dataset.start);
         const end = Number(action.dataset.end);
         if (Number.isFinite(start) && Number.isFinite(end)) {
-          applyReplacements([{ start, end, value: action.dataset.value || '' }], captureResourceViewState(action));
+          applyReplacements([{ start, end, value: action.dataset.value || '', expected: action.dataset.expected }], captureResourceViewState(action));
         }
         return;
       }
@@ -345,7 +387,7 @@
       const tokenIds = (control.dataset.tokenIds || '').split(',').filter(Boolean);
       const replacements = tokenIds.map(function (id) {
         const token = currentCatalog && currentCatalog.tokensById[id];
-        return token ? { start: token.nameRange.start, end: token.nameRange.end, value: nextValue } : null;
+        return token ? { start: token.nameRange.start, end: token.nameRange.end, value: nextValue, expected: token.name } : null;
       }).filter(Boolean);
       applyReplacements(replacements, captureResourceViewState(control));
       return;
@@ -360,7 +402,7 @@
     const start = Number(control.dataset.start);
     const end = Number(control.dataset.end);
     if (!Number.isFinite(start) || !Number.isFinite(end)) return;
-    applyReplacements([{ start, end, value: nextValue }], captureResourceViewState(control));
+    applyReplacements([{ start, end, value: nextValue, expected: control.dataset.expected }], captureResourceViewState(control));
   }
 
   function captureResourceViewState(control) {
@@ -379,9 +421,7 @@
 
   function restoreResourceViewState(state) {
     if (!state) return;
-    let attempts = 0;
     function restore() {
-      attempts += 1;
       resourceList.scrollTop = state.scrollTop || 0;
       if (state.anchorKey && state.anchorOffset !== null) {
         const anchor = resourceList.querySelector('[data-resource-key="' + cssEscape(state.anchorKey) + '"]');
@@ -392,7 +432,7 @@
         }
       }
       if (state.focusKey) restoreFocusControl(state);
-      if (attempts < 4) requestAnimationFrame(restore);
+
     }
     requestAnimationFrame(restore);
   }
@@ -417,18 +457,18 @@
   }
 
   function applyReplacements(replacements, viewState) {
-    const valid = replacements
-      .filter(function (item) { return item && item.start <= item.end; })
-      .sort(function (a, b) { return b.start - a.start; });
-    if (!valid.length) return;
-
-    let txt = source.value || '';
-    valid.forEach(function (item) {
-      txt = txt.slice(0, item.start) + item.value + txt.slice(item.end);
-    });
-    source.value = txt;
-    render();
-    restoreResourceViewState(viewState);
+    const txt = editor.getText();
+    const checked = validateReplacements(txt, currentCatalog && currentCatalog.generation, replacements);
+    if (!checked.ok) {
+      if (checked.reason === 'overlap') { setStatus('资源修改范围重叠，已取消', true); return; }
+      if (checked.reason === 'empty') return;
+      updateResourceList(txt); setStatus('资源已过期，已重新解析；请重试修改', true); return;
+    }
+    const valid = checked.replacements;
+    suppressScheduledChange = true;
+    editor.dispatchChanges(valid.map(function(item){return {start:item.start,end:item.end,value:item.value}}));
+    suppressScheduledChange = false;
+    renderImmediately(viewState);
   }
 
   function readSortMode() {
@@ -454,20 +494,23 @@
 
   function rebuildResourceTree() {
     if (!currentCatalog) return;
-    const tree = buildResourceTree(currentCatalog);
-    resourceList.innerHTML = renderCatalogSummary(currentCatalog) + renderTreeNode(tree, 0);
+    const tree=measurePerf('catalog.tree',()=>buildResourceTree(currentCatalog),{resources:currentCatalog.resources.length});
+    const html=renderCatalogSummary(currentCatalog)+renderTreeNode(tree,0); measurePerf('catalog.innerHTML',()=>{resourceList.innerHTML=html},{resources:currentCatalog.resources.length}); if(selectedResourceId){resourceList.querySelector('[data-resource-id="'+cssEscape(selectedResourceId)+'"]')?.classList.add('is-active')}
   }
 
   function updateResourceList(bbcode) {
-    currentCatalog = parseResourceCatalog(bbcode || '');
-    resourceCount.textContent = String(currentCatalog.resources.length);
-
-    if (!currentCatalog.resources.length && !currentCatalog.errors.length) {
-      resourceList.innerHTML = '<div class="resource-empty">未发现资源</div>';
-      return;
-    }
-
-    rebuildResourceTree();
+    const next=measurePerf('catalog.parse',()=>parseResourceCatalog(bbcode||''),{length:(bbcode||'').length});
+    const nextFp=measurePerf('catalog.fingerprint',()=>catalogFingerprints(next),{resources:next.resources.length});
+    const previousFp=catalogFingerprintsCurrent; currentCatalog=next; catalogFingerprintsCurrent=nextFp;
+    editor.setDecorations(catalogDiagnosticRanges(next.errors,(bbcode||'').length)); resourceCount.textContent=String(next.resources.length);
+    if(previousFp&&previousFp.content===nextFp.content){if(previousFp.line!==nextFp.line)updateCatalogLines(next);return}
+    if(!next.resources.length&&!next.errors.length){resourceList.innerHTML='<div class="resource-empty">未发现资源</div>';return}
+    measurePerf('catalog.renderHTML',()=>rebuildResourceTree(),{resources:next.resources.length});
+  }
+  function updateCatalogLines(catalog){
+    const byId=new Map(catalog.resources.map(r=>[r.stableId,r]));
+    resourceList.querySelectorAll('[data-locate-id]').forEach(button=>{const item=byId.get(button.dataset.locateId);if(item)button.textContent='L'+(item.line||'')});
+    const byError=new Map(catalog.errors.map(e=>[e.id,e])); resourceList.querySelectorAll('[data-locate-error]').forEach(button=>{const e=byError.get(button.dataset.locateError);if(e)button.textContent='第 '+e.line+' 行：'+e.message});
   }
 
   function parseResourceCatalog(bbcode) {
@@ -477,7 +520,8 @@
     const consumed = [];
     const prefixStack = [];
     const suffixStack = [];
-    const lines = splitLinesWithOffsets(bbcode);
+    const lineStarts=buildLineIndex(bbcode);
+    const lines = splitLinesWithOffsets(bbcode).map((x,index)=>({...x,line:index+1}));
     const imageDefaults = [];
     let tokenSeq = 0;
     let resourceSeq = 0;
@@ -489,15 +533,15 @@
       let match;
 
       while ((match = commentRegex.exec(line))) {
-        const token = parseCommentToken(match, lineInfo.offset, tokenSeq++);
+        const token = parseCommentToken(match, lineInfo.offset, tokenSeq++, lineInfo.line);
         tokensById[token.id] = token;
         if (token.mode === 'imageDefault') imageDefaults.push(token);
         events.push({ kind: 'comment', index: match.index, token });
       }
 
-      collectDybgEvents(line, lineInfo, events);
-      collectUrlEvents(line, lineInfo, events);
-      collectImgEvents(line, lineInfo, events);
+      collectDybgEvents(line, lineInfo, events, bbcode);
+      collectUrlEvents(line, lineInfo, events, bbcode);
+      collectImgEvents(line, lineInfo, events, bbcode);
       events.sort(function (a, b) {
         if (a.index !== b.index) return a.index - b.index;
         return a.kind === 'comment' ? -1 : 1;
@@ -519,7 +563,7 @@
             closeStack(suffixStack, token, '后缀目录', errors);
           } else if (token.feature === 'text') {
             currentNameToken = token;
-            const item = extractTextResource(line, lineInfo, token, prefixStack, suffixStack, resourceSeq++);
+            const item = extractTextResource(bbcode, line, lineInfo, token, prefixStack, suffixStack, resourceSeq++);
             resources.push(item);
             consumed.push(item.range);
           } else if (token.feature === 'attr') {
@@ -556,10 +600,12 @@
       errors.push(makeError('后缀目录未闭合：' + token.name, token));
     });
 
-    collectUncategorized(bbcode, consumed, resources, resourceSeq);
+    collectUncategorized(bbcode, consumed, resources, resourceSeq, lineStarts);
     applyImageDefaults(imageDefaults, resources, errors);
-    return { resources, errors, tokensById };
+    const generation = hashText(bbcode); const stableCounts=Object.create(null); resources.forEach(function(item){const base=stableResourceId(item,bbcode);const occurrence=stableCounts[base]||0;stableCounts[base]=occurrence+1;item.stableId=base+':'+occurrence}); return { resources, errors, tokensById, generation, snapshot: bbcode };
   }
+
+  function stableResourceId(item, text) { const core=text.slice(item.range.start,item.range.end); return item.type+':'+item.sourceKind+':'+hashText(core)+':'+hashText(item.name||''); }
 
   function splitLinesWithOffsets(text) {
     const result = [];
@@ -573,7 +619,7 @@
     return result;
   }
 
-  function parseCommentToken(match, lineOffset, seq) {
+  function parseCommentToken(match, lineOffset, seq, lineNumber) {
     const raw = match[2];
     const rawStart = lineOffset + match.index + match[1].length;
     const leading = raw.match(/^\s*/)[0].length;
@@ -633,7 +679,7 @@
       name,
       defaultValue,
       raw,
-      line: lineNumberFromOffset(source.value || '', lineOffset),
+      line: lineNumber,
       range: { start: lineOffset + match.index, end: lineOffset + match.index + match[0].length },
       nameRange: { start: trimmedStart + nameStartRel, end: trimmedStart + nameEndRel }
     };
@@ -665,7 +711,7 @@
     closeToken.pairedTokenId = openToken.id;
   }
 
-  function collectDybgEvents(line, lineInfo, events) {
+  function collectDybgEvents(line, lineInfo, events, bbcode) {
     const regex = /dybg\s+([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^\]\s]*)/gi;
     let match;
     while ((match = regex.exec(line))) {
@@ -683,12 +729,12 @@
         index: match.index,
         range: { start: lineInfo.offset + match.index, end: lineInfo.offset + match.index + match[0].length },
         fields,
-        line: lineNumberFromOffset(source.value || '', lineInfo.offset)
+        line: lineInfo.line
       });
     }
   }
 
-  function collectUrlEvents(line, lineInfo, events) {
+  function collectUrlEvents(line, lineInfo, events, bbcode) {
     const regex = /\[url=([^\]]*)\]/gi;
     let match;
     while ((match = regex.exec(line))) {
@@ -699,12 +745,12 @@
         value: match[1],
         valueRange: { start: valueStart, end: valueStart + match[1].length },
         range: { start: lineInfo.offset + match.index, end: lineInfo.offset + match.index + match[0].length },
-        line: lineNumberFromOffset(source.value || '', lineInfo.offset)
+        line: lineInfo.line
       });
     }
   }
 
-  function collectImgEvents(line, lineInfo, events) {
+  function collectImgEvents(line, lineInfo, events, bbcode) {
     const regex = /\[img[^\]]*\]([\s\S]*?)\[\/img\]/gi;
     let match;
     while ((match = regex.exec(line))) {
@@ -716,12 +762,12 @@
         value: match[1],
         valueRange: { start: valueStart, end: valueStart + match[1].length },
         range: { start: lineInfo.offset + match.index, end: lineInfo.offset + match.index + match[0].length },
-        line: lineNumberFromOffset(source.value || '', lineInfo.offset)
+        line: lineInfo.line
       });
     }
   }
 
-  function extractTextResource(line, lineInfo, token, prefixStack, suffixStack, seq) {
+  function extractTextResource(bbcode, line, lineInfo, token, prefixStack, suffixStack, seq) {
     const localTokenStart = token.range.start - lineInfo.offset;
     const localStart = token.range.end - lineInfo.offset;
     const openStyles = collectOpenStyleTags(line.slice(0, localTokenStart), lineInfo.offset);
@@ -729,7 +775,7 @@
     const valueEndLocal = findTextContainerEnd(line, localStart, openStyles.length);
     const valueEnd = valueEndLocal === -1 ? valueStart : lineInfo.offset + valueEndLocal;
     const item = createBaseResource('text', '\u6587\u672c', token, prefixStack, suffixStack, seq);
-    item.value = (source.value || '').slice(valueStart, valueEnd);
+    item.value = bbcode.slice(valueStart, valueEnd);
     item.valueRange = { start: valueStart, end: valueEnd };
     item.range = { start: token.range.start, end: valueEnd };
     item.textStyles = extractTextStyleFields(openStyles);
@@ -805,9 +851,9 @@
     item.value = match[1];
     item.valueRange = { start: contentStart, end: contentEnd };
     item.range = { start: tagStart, end: tagStart + match[0].length };
-    item.attributes = parseAttributes(match[1], contentStart);
-    item.colors = findColorRanges(match[1], contentStart);
     item.fields = parseKnownAttributes(match[1], contentStart);
+    item.attributes = item.fields.map(field=>({key:field.key,value:field.value,label:field.label,range:field.range}));
+    item.colors = findColorRanges(match[1], contentStart);
     return item;
   }
 
@@ -969,10 +1015,10 @@
     };
   }
 
-  function collectUncategorized(bbcode, consumed, resources, resourceSeq) {
-    const ranges = consumed.slice();
+  function collectUncategorized(bbcode, consumed, resources, resourceSeq, lineStarts) {
+    const ranges = mergeIntervals(consumed);
     const addIfFree = function (type, sourceKind, start, end, value, valueStart, valueEnd) {
-      if (ranges.some(function (range) { return start < range.end && end > range.start; })) return;
+      if (overlapsIntervals(ranges,start,end)) return;
       const item = {
         id: 'r' + resourceSeq++,
         type,
@@ -982,7 +1028,7 @@
         pathTokenIds: [],
         pathKeys: [SYSTEM_UNCATEGORIZED_KEY],
         path: '\\' + UNCATEGORIZED,
-        line: lineNumberFromOffset(bbcode, start),
+        line: lineNumberAt(lineStarts,start),
         value,
         url: value,
         valueRange: { start: valueStart, end: valueEnd },
@@ -991,7 +1037,7 @@
         errors: []
       };
       resources.push(item);
-      ranges.push(item.range);
+      ranges.splice(0,ranges.length,...mergeIntervals(ranges.concat(item.range)));
     };
 
     let match;
@@ -1006,7 +1052,7 @@
         fields.push({ value, range: { start: relStart, end: relEnd } });
         searchAt = relEnd + 1;
       }
-      if (!ranges.some(function (range) { return match.index < range.end && match.index + match[0].length > range.start; })) {
+      if (!overlapsIntervals(ranges,match.index,match.index+match[0].length)) {
         const item = {
           id: 'r' + resourceSeq++,
           type: 'image',
@@ -1016,7 +1062,7 @@
           pathTokenIds: [],
           pathKeys: [SYSTEM_UNCATEGORIZED_KEY],
           path: '\\' + UNCATEGORIZED,
-          line: lineNumberFromOffset(bbcode, match.index),
+          line: lineNumberAt(lineStarts,match.index),
           params: [
             { label: '缩放', field: fields[0] },
             { label: '位置X', field: fields[1] },
@@ -1031,7 +1077,7 @@
           errors: []
         };
         resources.push(item);
-        ranges.push(item.range);
+        ranges.splice(0,ranges.length,...mergeIntervals(ranges.concat(item.range)));
       }
     }
 
@@ -1053,15 +1099,14 @@
       if (!byName[declaration.name]) byName[declaration.name] = [];
       byName[declaration.name].push(declaration);
     });
+    const resourcesByName=Object.create(null); resources.forEach(function(item){if(item.type!=='image')return;const name=item.pathParts[item.pathParts.length-1];(resourcesByName[name]||(resourcesByName[name]=[])).push(item)});
     Object.keys(byName).forEach(function (name) {
       const matches = byName[name];
       if (matches.length > 1) {
         matches.forEach(function (token) { errors.push(makeError('\u91cd\u590d\u7684\u56fe\u7247\u9ed8\u8ba4\u58f0\u660e\uff1a' + name, token)); });
         return;
       }
-      resources.forEach(function (item) {
-        if (item.type === 'image' && item.pathParts[item.pathParts.length - 1] === name) item.defaultUrl = matches[0].defaultValue;
-      });
+      (resourcesByName[name]||[]).forEach(function(item){item.defaultUrl=matches[0].defaultValue});
     });
   }
 
@@ -1071,7 +1116,10 @@
       message,
       line: token.line,
       pathParts: [UNCATEGORIZED],
-      path: '\\' + UNCATEGORIZED
+      path: '\\' + UNCATEGORIZED,
+      from: (token.fullRange || token.nameRange || token.range).start,
+      to: (token.fullRange || token.nameRange || token.range).end,
+      severity: 'error'
     };
   }
 
@@ -1099,13 +1147,14 @@
       node.resources.push(item);
     });
     catalog.errors.forEach(function (error) { root.errors.push(error); });
-    return root;
+    cacheResourceCounts(root); return root;
   }
 
   function renderCatalogSummary(catalog) {
     const errorHtml = catalog.errors.length
       ? '<div class="resource-errors">' + catalog.errors.map(function (error) {
-        return '<div class="resource-error">第 ' + escapeHtml(error.line) + ' 行：' + escapeHtml(error.message) + '</div>';
+        const locate = Number.isInteger(error.from) && Number.isInteger(error.to) && error.from < error.to ? ' data-locate-error="' + escapeHtml(error.id) + '"' : '';
+        return '<button type="button" class="resource-error"' + locate + '>第 ' + escapeHtml(error.line) + ' 行：' + escapeHtml(error.message) + '</button>';
       }).join('') + '</div>'
       : '';
     return '<div class="catalog-summary">资源 ' + catalog.resources.length + ' 项，提示 ' + catalog.errors.length + ' 项</div>' + errorHtml;
@@ -1120,7 +1169,7 @@
         ? '<input class="dir-name-input" data-edit-kind="comment-name-bulk" data-focus-key="dir:' + escapeHtml(tokenIds.join(',')) + '" data-token-ids="' + escapeHtml(tokenIds.join(',')) + '" value="' + escapeHtml(child.name) + '" title="修改关联 comment 名称">'
         : '<span class="dir-name-static">' + escapeHtml(child.name) + systemLabel + '</span>';
       const isOpen = directoryOpenState.has(child.key) ? directoryOpenState.get(child.key) : !child.isSystemUncategorized;
-      return '<details class="catalog-dir' + (child.isSystemUncategorized ? ' catalog-dir-system' : '') + '" data-directory-key="' + escapeHtml(child.key) + '"' + (isOpen ? ' open' : '') + ' style="--depth:' + depth + '"><summary>' + rename + '<span class="dir-count">' + countResources(child) + '</span></summary>' + renderTreeNode(child, depth + 1) + '</details>';
+      return '<details class="catalog-dir' + (child.isSystemUncategorized ? ' catalog-dir-system' : '') + '" data-directory-key="' + escapeHtml(child.key) + '"' + (isOpen ? ' open' : '') + ' style="--depth:' + depth + '"><summary>' + rename + '<span class="dir-count">' + child.resourceCount + '</span></summary>' + renderTreeNode(child, depth + 1) + '</details>';
     }).join('');
     const resources = node.resources.slice();
     if (resourceSortMode !== 'default') resources.sort(compareResources);
@@ -1142,18 +1191,15 @@
   function renderResourceItem(item) {
     const typeLabel = item.type === 'image' ? '图片' : item.type === 'url' ? 'URL' : item.type === 'text' ? '文本' : '属性';
     const warnings = item.errors && item.errors.length ? '<div class="resource-item-errors">' + item.errors.map(escapeHtml).join('<br>') + '</div>' : '';
-    return '<article class="catalog-resource resource-kind-' + escapeHtml(item.type) + '" data-resource-key="' + escapeHtml(resourceKey(item)) + '">' +
+    return '<article class="catalog-resource resource-kind-' + escapeHtml(item.type) + '" data-resource-key="' + escapeHtml(resourceAnchorKey(item)) + '" data-resource-id="' + escapeHtml(item.stableId) + '">' +
       '<header><span class="resource-type resource-type-' + escapeHtml(item.type) + '">' + typeLabel + '</span>' +
       '<span class="resource-source">' + escapeHtml(item.sourceKind) + '</span>' +
-      '<span class="resource-line">L' + escapeHtml(item.line || '') + '</span></header>' +
+      '<button type="button" class="resource-line resource-locate" data-locate-id="' + escapeHtml(item.stableId) + '">L' + escapeHtml(item.line || '') + '</button></header>' +
       '<div class="resource-path" title="' + escapeHtml(item.path) + '">' + escapeHtml(item.path) + '</div>' +
       renderResourceEditor(item) + warnings +
       '</article>';
   }
 
-  function resourceKey(item) {
-    return item.type + ':' + item.sourceKind + ':' + item.line + ':' + item.path;
-  }
 
   function renderResourceEditor(item) {
     if (item.type === 'image') return renderImageEditor(item);
@@ -1165,7 +1211,7 @@
 
   function renderImageEditor(item) {
     const fullUrl = toFullImageUrl(item.url || '');
-    const thumb = item.url ? '<a class="resource-thumb-link" data-preview-url="' + escapeHtml(fullUrl) + '" href="' + escapeHtml(fullUrl) + '" target="_blank" rel="noreferrer"><img class="resource-thumb" src="' + escapeHtml(fullUrl) + '" alt=""></a>' : '<span class="resource-thumb-empty" role="img" aria-label="图片链接为空"><span class="resource-thumb-empty-marker" aria-hidden="true">×</span></span>';
+    const thumb = item.url ? '<a class="resource-thumb-link" data-preview-url="' + escapeHtml(fullUrl) + '" href="' + escapeHtml(fullUrl) + '" target="_blank" rel="noreferrer"><img class="resource-thumb" loading="lazy" decoding="async" src="' + escapeHtml(fullUrl) + '" alt=""></a>' : '<span class="resource-thumb-empty" role="img" aria-label="图片链接为空"><span class="resource-thumb-empty-marker" aria-hidden="true">×</span></span>';
     const params = item.params ? '<div class="dybg-param-grid">' + item.params.map(function (param) {
       return renderInputField(param.label, param.field.value, param.field.range, 'text');
     }).join('') + '</div>' : '';
@@ -1185,7 +1231,7 @@
     const fields = item.fields && item.fields.length
       ? '<div class="attr-list">' + item.fields.map(renderAttributeField).join('') + '</div>'
       : '<div class="attr-list empty-url">无额外属性</div>';
-    return '<div class="resource-fields"><label class="attr-raw-field">标签属性 <textarea data-edit-kind="range" data-start="' + item.valueRange.start + '" data-end="' + item.valueRange.end + '">' + escapeHtml(item.value) + '</textarea></label>' + fields + '</div>';
+    return '<div class="resource-fields"><label class="attr-raw-field">标签属性 <textarea data-edit-kind="range" data-start="' + item.valueRange.start + '" data-end="' + item.valueRange.end + '" data-expected="' + escapeHtml(item.value) + '">' + escapeHtml(item.value) + '</textarea></label>' + fields + '</div>';
   }
 
   function renderAttributeField(field) {
@@ -1195,7 +1241,7 @@
 
   function renderColorField(label, value, range) {
     const parsed = parseColorValue(value || '');
-    return '<label class="color-field">' + escapeHtml(label) + '<span class="color-edit"><input class="color-swatch" type="color" data-edit-kind="color" data-focus-key="range:' + range.start + ':' + range.end + ':color" data-start="' + range.start + '" data-end="' + range.end + '" data-alpha="' + escapeHtml(parsed.alpha) + '" value="' + escapeHtml(parsed.hex) + '"><input class="color-hex-input" data-edit-kind="range" data-color-alpha="1" data-focus-key="range:' + range.start + ':' + range.end + ':hex" data-start="' + range.start + '" data-end="' + range.end + '" value="' + escapeHtml(parsed.full) + '" maxlength="9"></span></label>';
+    return '<label class="color-field">' + escapeHtml(label) + '<span class="color-edit"><input class="color-swatch" type="color" data-edit-kind="color" data-focus-key="range:' + range.start + ':' + range.end + ':color" data-start="' + range.start + '" data-end="' + range.end + '" data-expected="' + escapeHtml(value) + '" data-alpha="' + escapeHtml(parsed.alpha) + '" value="' + escapeHtml(parsed.hex) + '"><input class="color-hex-input" data-edit-kind="range" data-color-alpha="1" data-focus-key="range:' + range.start + ':' + range.end + ':hex" data-start="' + range.start + '" data-end="' + range.end + '" data-expected="' + escapeHtml(value || '') + '" value="' + escapeHtml(parsed.full) + '" maxlength="9"></span></label>';
   }
 
   function parseColorValue(value) {
@@ -1210,24 +1256,24 @@
   }
 
   function renderValueActions(value, range, options) {
-    const clear = options && options.clear ? '<button type="button" data-resource-action="clear" data-start="' + range.start + '" data-end="' + range.end + '" data-value=""' + (value ? '' : ' disabled') + '>\u6e05\u7a7a</button>' : '';
+    const clear = options && options.clear ? '<button type="button" data-resource-action="clear" data-start="' + range.start + '" data-end="' + range.end + '" data-value="" data-expected="' + escapeHtml(value) + '"' + (value ? '' : ' disabled') + '>\u6e05\u7a7a</button>' : '';
     const hasDefault = options && Object.prototype.hasOwnProperty.call(options, 'defaultValue') && options.defaultValue !== undefined;
-    const defaultButton = hasDefault ? '<button type="button" data-resource-action="default" data-start="' + range.start + '" data-end="' + range.end + '" data-value="' + escapeHtml(options.defaultValue) + '"' + (value === options.defaultValue ? ' disabled' : '') + '>\u9ed8\u8ba4</button>' : '';
+    const defaultButton = hasDefault ? '<button type="button" data-resource-action="default" data-start="' + range.start + '" data-end="' + range.end + '" data-value="' + escapeHtml(options.defaultValue) + '" data-expected="' + escapeHtml(value) + '"' + (value === options.defaultValue ? ' disabled' : '') + '>\u9ed8\u8ba4</button>' : '';
     return clear || defaultButton ? '<span class="resource-value-actions">' + clear + defaultButton + '</span>' : '';
   }
 
   function renderInputField(label, value, range, type, className, options) {
     const constraints = options ? (options.min != null ? ' min="' + escapeHtml(options.min) + '"' : '') + (options.step != null ? ' step="' + escapeHtml(options.step) + '"' : '') : '';
-    return '<label>' + escapeHtml(label) + '<span class="resource-value-control"><input class="' + escapeHtml(className || '') + '" type="' + escapeHtml(type || 'text') + '" data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':input" data-start="' + range.start + '" data-end="' + range.end + '" value="' + escapeHtml(value || '') + '"' + constraints + '>' + renderValueActions(value || '', range, options) + '</span></label>';
+    return '<label>' + escapeHtml(label) + '<span class="resource-value-control"><input class="' + escapeHtml(className || '') + '" type="' + escapeHtml(type || 'text') + '" data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':input" data-start="' + range.start + '" data-end="' + range.end + '" data-expected="' + escapeHtml(value || '') + '" value="' + escapeHtml(value || '') + '"' + constraints + '>' + renderValueActions(value || '', range, options) + '</span></label>';
   }
 
   function renderTextareaField(label, value, range, options) {
-    return '<label class="text-resource-field">' + escapeHtml(label) + '<span class="resource-value-control"><textarea data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':textarea" data-start="' + range.start + '" data-end="' + range.end + '">' + escapeHtml(value || '') + '</textarea>' + renderValueActions(value || '', range, options) + '</span></label>';
+    return '<label class="text-resource-field">' + escapeHtml(label) + '<span class="resource-value-control"><textarea data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':textarea" data-start="' + range.start + '" data-end="' + range.end + '" data-expected="' + escapeHtml(value || '') + '">' + escapeHtml(value || '') + '</textarea>' + renderValueActions(value || '', range, options) + '</span></label>';
   }
 
   function countResources(node) {
     return node.resources.length + node.children.reduce(function (sum, child) {
-      return sum + countResources(child);
+      return sum + child.resourceCount;
     }, 0);
   }
 
@@ -1257,14 +1303,12 @@
   }
 
   loadSampleButton.addEventListener('click', loadSample);
-  renderButton.addEventListener('click', render);
+  renderButton.addEventListener('click', function () { renderImmediately(); });
   loginNgaButton.addEventListener('click', openLogin);
   loadPostButton.addEventListener('click', loadPostFromUrl);
   savePostButton.addEventListener('click', saveCurrentPost);
   resourceSort.value = resourceSortMode;
-  source.addEventListener('keydown', function (event) {
-    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') render();
-  });
+  resourceList.addEventListener('click', function(event){ if(!currentCatalog)return; const errorButton=event.target.closest('[data-locate-error]'); if(errorButton){const issue=currentCatalog.errors.find(function(e){return e.id===errorButton.dataset.locateError});if(issue&&Number.isInteger(issue.from)&&Number.isInteger(issue.to))editor.setSelection(issue.from,issue.to,true);return;} const locate=event.target.closest('[data-locate-id]'); if(!locate)return; const item=currentCatalog.resources.find(function(r){return r.stableId===locate.dataset.locateId}); if(item){selectedResourceId=item.stableId;editor.setSelection(item.range.start,item.range.end,true);} });
 
   init().catch(function (error) {
     setStatus('初始化失败：' + error.message, true);

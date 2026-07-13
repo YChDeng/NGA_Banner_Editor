@@ -1,0 +1,8 @@
+import {hashText} from './catalog-guards.js';
+export function buildLineIndex(text){const starts=[0];for(let i=0;i<text.length;i++)if(text.charCodeAt(i)===10)starts.push(i+1);return starts}
+export function lineNumberAt(starts,offset){let lo=0,hi=starts.length;while(lo<hi){const m=(lo+hi)>>1;if(starts[m]<=offset)lo=m+1;else hi=m}return Math.max(1,lo)}
+export function mergeIntervals(ranges){const sorted=ranges.filter(r=>r.start<r.end).map(r=>({start:r.start,end:r.end})).sort((a,b)=>a.start-b.start||a.end-b.end),out=[];for(const r of sorted){const last=out[out.length-1];if(last&&r.start<=last.end)last.end=Math.max(last.end,r.end);else out.push(r)}return out}
+export function overlapsIntervals(ranges,start,end){let lo=0,hi=ranges.length;while(lo<hi){const m=(lo+hi)>>1;if(ranges[m].end<=start)lo=m+1;else hi=m}return lo<ranges.length&&ranges[lo].start<end}
+function stable(value){if(Array.isArray(value))return value.map(stable);if(value&&typeof value==='object'){const out={};for(const k of Object.keys(value).sort())if(k!=='generation'&&k!=='snapshot')out[k]=stable(value[k]);return out}return value}
+export function catalogFingerprints(catalog){const line={resources:catalog.resources.map(r=>[r.stableId,r.line]),errors:catalog.errors.map(e=>[e.id,e.line])};const content={resources:catalog.resources.map(({line,...r})=>r),errors:catalog.errors.map(({line,...e})=>e)};return{content:hashText(JSON.stringify(stable(content))),line:hashText(JSON.stringify(line))}}
+export function cacheResourceCounts(node){let count=node.resources.length;for(const child of node.children)count+=cacheResourceCounts(child);node.resourceCount=count;return count}

@@ -1,0 +1,9 @@
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+let src=fs.readFileSync('src/catalog-guards.js','utf8').replace(/export function /g,'function ');src+='\nmodule.exports={hashText,catalogGeneration,validateReplacements,catalogDiagnosticRanges,resourceAnchorKey};';const box={module:{exports:{}}};vm.runInNewContext(src,box);const {catalogGeneration,validateReplacements,catalogDiagnosticRanges,resourceAnchorKey}=box.module.exports;
+test('generation is deterministic and changes with content',()=>{assert.equal(catalogGeneration('abc'),catalogGeneration('abc'));assert.notEqual(catalogGeneration('abc'),catalogGeneration('abd'))});
+test('replacement boundaries and expected text validate',()=>{const t='abcd',g=catalogGeneration(t);assert.equal(validateReplacements(t,g,[{start:0,end:0,value:'x',expected:''}]).ok,true);assert.equal(validateReplacements(t,g,[{start:0,end:4,value:'x',expected:'abcd'}]).ok,true);assert.equal(validateReplacements(t,g,[{start:1,end:3,value:'x',expected:'no'}]).reason,'expected')});
+test('overlapping replacements are rejected while adjacent pass',()=>{const t='abcdef',g=catalogGeneration(t);assert.equal(validateReplacements(t,g,[{start:1,end:4},{start:3,end:5}]).reason,'overlap');assert.equal(validateReplacements(t,g,[{start:1,end:3},{start:3,end:5}]).ok,true)});
+test('stale generation is rejected',()=>assert.equal(validateReplacements('new','old',[{start:0,end:1}]).reason,'stale'));
+
+test('catalog diagnostics keep only valid document ranges',()=>{assert.equal(JSON.stringify(catalogDiagnosticRanges([{from:2,to:5,message:'bad'},{from:5,to:5},{from:-1,to:2},{from:8,to:12}],10)),JSON.stringify([{start:2,end:5,class:'cm-diagnostic',message:'bad',severity:'error'}]))});
+test('resource anchor uses stable id only',()=>{assert.equal(resourceAnchorKey({stableId:'image:abc:0',line:9,path:'\\changed'}),'image:abc:0');assert.equal(resourceAnchorKey({line:1}),'')});
