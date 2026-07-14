@@ -48,43 +48,19 @@ npm start
    - 在本地修改 BBCode 或资源字段。
    - 点击 `发布修改`，确认后保存到帖子。
 
-## 基于 Comment 的资源目录
+## Block/Slot 扩展语法
 
-资源列表会根据 NGA 注释标签推断路径。例如：
+资源面板把 `[comment // ...]` 扩展解释为 Block（逻辑目录）、图片/链接/文本 Slot 和 StyleBlock。这些 comment 只供编辑器归类和编辑，不改变 NGA 渲染；BBCode 源码始终是唯一真值，每次修改后都会从完整源码重新解析。
 
-```bbcode
-[comment // ++Pg1_穗穗]
-[comment // ++版头左侧菜单]
-[comment // 选中效果++]
-[comment // icon-01][style ... dybg ...;./mon_202606/10/example.webp]
-[comment // 选中效果--]
-[comment // --版头左侧菜单]
-[comment // --Pg1_穗穗]
-```
-
-上面的图片资源会被归类到：
-
-```text
-\Pg1_穗穗\版头左侧菜单\icon-01\选中效果
-```
-
-支持的资源类型：
-
-- 图片：`dybg ...;URL` 和 `[img]URL[/img]`
-- 链接：`[url=URL]...[/url]`
-- 文本：`[comment // Name!文本]...[/...]`
-- 属性：`[comment // Name!属性][style ...]` 或 `[fixsize ...]`
-
-无法通过 comment 规则归类的资源会放入 `\未分类`。
-图片可以声明按路径末级名称匹配的默认值：
+最小示例中，普通命名 comment 与目标资源位于同一行，路径最后一级是 Slot：
 
 ```bbcode
-[comment // #悬停效果!图片 = ./mon_202601/18/example.webp]
+[comment // ++导航]
+[comment // 首页][url=https://example.com]进入首页[/url]
+[comment // --导航]
 ```
 
-该声明会为所有资源路径最后一级严格等于 `悬停效果` 的图片提供“默认”操作，但不会自动覆盖图片当前值。图片、链接和文本均可使用“清空”操作；这些操作只修改资源值，不改变 `dybg` 参数、`style` 布局或其他属性。同名图片默认声明重复时不会应用，并会在资源面板中显示错误。
-
-对于 `[comment // Name!文本]`，资源面板还会读取同一行中、位于 comment 之前并仍包裹文本的 `style` 标签。目前可编辑 `color`（文字颜色，仅 `#RGB` 或 `#RRGGBB`）以及 `font` 的首个参数（字号，单位 `em`）；不会从其他行继承这些属性。
+版头作者请阅读 [Block/Slot 扩展语法规范](docs/extension-syntax.md)，其中包含目录栈、三类 Slot、StyleBlock、默认值与三态、冲突、诊断、重命名和综合示例。开发者如需了解规范化对象、range、generation 与生命周期，请阅读 [Banner Block/Slot 数据模型](docs/data-model.md)。
 
 ## 属性解析
 
@@ -111,9 +87,15 @@ src/
   main.js       Electron 主进程，包含 NGA 登录、导入、发布相关 IPC
   preload.js    安全暴露给渲染进程的 API
   index.html    应用界面结构
-  renderer.js   BBCode 渲染、资源目录、编辑交互
-  app.css       应用布局和资源编辑样式
+  renderer.js          BBCode 渲染、资源目录、编辑交互
+  banner-model.js       Block/Slot 规范模型、解析、诊断和源码范围
+  banner-model-view.js  从模型派生资源面板绑定
+  app.css               应用布局和资源编辑样式
   nga-shim.js   在 Electron 中运行 NGA 脚本所需的兼容层
+
+docs/
+  extension-syntax.md  面向版头作者的 Block/Slot 扩展语法规范
+  data-model.md         BannerModel 的开发者数据模型说明
 
 img4.nga.178.com/
   本地下载的 NGA JavaScript/CSS 文件，渲染器会直接使用

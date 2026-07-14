@@ -533,7 +533,10 @@ body {
 }
 
 .color-field {
-  grid-template-columns: 5.5em auto !important;
+  display: grid;
+  grid-template-columns: 5.5em auto;
+  gap: 6px;
+  align-items: center;
 }
 
 .color-edit {

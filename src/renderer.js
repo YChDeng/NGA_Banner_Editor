@@ -1,11 +1,11 @@
 import {createEditorAdapter} from './editor-adapter.js';
 import {hashText, validateReplacements, catalogDiagnosticRanges, resourceAnchorKey} from './catalog-guards.js';
-import {buildLineIndex,lineNumberAt,mergeIntervals,overlapsIntervals,catalogFingerprints,cacheResourceCounts} from './catalog-helpers.js';
+import {catalogFingerprints,cacheResourceCounts} from './catalog-helpers.js';
 import {measurePerf} from './performance.js';
+import {buildBannerModel, SYSTEM_UNCATEGORIZED_KEY} from './banner-model.js';
+import {deriveResourceBindings} from './banner-model-view.js';
 ;(function () {
   const ATTACH_BASE = 'https://img.nga.178.com/attachments';
-  const UNCATEGORIZED = '未分类';
-  const SYSTEM_UNCATEGORIZED_KEY = '__system_uncategorized__';
   const SORT_STORAGE_KEY = 'resourceSortMode';
   const SORT_MODES = new Set(['default', 'name-asc', 'name-desc']);
 
@@ -32,15 +32,11 @@ import {measurePerf} from './performance.js';
   const workbenchPane = document.querySelector('.workbench-pane');
   const workbenchSeparator = document.querySelector('.workbench-separator');
 
-  let paths = null;
-  let currentCatalog = null;
+  let currentModel = null;
+  let currentResourceBindings = [];
   let currentPostContext = null;
   let resourceSortMode = readSortMode();
   const directoryOpenState = new Map();
-  const BB_TAGS = new Set(('b i u s del collapse quote code url img flash audio video color size font align list li table tr td th style fixsize span div ' +
-    'h hr br crypt random dice pid tid uid mention attach album emoticon left center right justify comment').split(/\s+/));
-  const STYLE_ATTRIBUTES = new Set(('color background font align width height line-height border-radius left right top bottom rotate ' +
-    'filter-drop-shadow dybg display position margin padding opacity transform z-index').split(/\s+/));
   let catalogTimer = 0;
   let previewTimer = 0;
   let updateVersion = 0;
@@ -73,8 +69,8 @@ import {measurePerf} from './performance.js';
   }
 
   function syncResourceFromSelection(selection) {
-    if (!currentCatalog) return;
-    const candidates = currentCatalog.resources.filter(function (r) { return selection.from === selection.to ? selection.from >= r.range.start && selection.from <= r.range.end : selection.from < r.range.end && selection.to > r.range.start; }).sort(function(a,b){return (a.range.end-a.range.start)-(b.range.end-b.range.start)});
+    if (!currentModel) return;
+    const candidates = currentResourceBindings.filter(function (r) { return selection.from === selection.to ? selection.from >= r.range.start && selection.from <= r.range.end : selection.from < r.range.end && selection.to > r.range.start; }).sort(function(a,b){return (a.range.end-a.range.start)-(b.range.end-b.range.start)});
     const id = candidates[0] && candidates[0].stableId;
     if (!id || id === selectedResourceId) return; selectedResourceId=id;
     resourceList.querySelectorAll('.is-active').forEach(function(el){el.classList.remove('is-active')});
@@ -96,7 +92,7 @@ import {measurePerf} from './performance.js';
     initResourceSorting();
     editor = createEditorAdapter(sourceHost, { onChange: scheduleLiveUpdates, onSelectionChange: syncResourceFromSelection, onModEnter: render });
     await refreshAuthStatus();
-    paths = await window.bbcodePreview.getPaths();
+    await window.bbcodePreview.getPaths();
     window.__NGA_REMOTE_ATTACH_BASE = ATTACH_BASE;
     if (window.commonui) {
       window.commonui.getAttachBase = function () { return ATTACH_BASE; };
@@ -190,7 +186,7 @@ import {measurePerf} from './performance.js';
       renderWithOriginalParser(txt, previewStaging);
       if (version !== updateVersion) { previewStaging.replaceChildren(); return; }
       preview.replaceChildren(...Array.from(previewStaging.childNodes)); previewFingerprint=fingerprint;
-      const hints=currentCatalog?.errors.length; setStatus(hints?'预览已更新，资源提示 '+hints+' 项':'已使用 NGA 原解析器渲染',Boolean(hints));
+      const hints=currentModel?.diagnostics.length; setStatus(hints?'预览已更新，资源提示 '+hints+' 项':'已使用 NGA 原解析器渲染',Boolean(hints));
     } catch(error) { previewStaging?.replaceChildren(); const node=document.createElement('div');node.className='render-error';node.textContent=error.stack||error.message;preview.replaceChildren(node);setStatus('NGA 原解析器失败：'+error.message,true); }
   }
   function renderWithOriginalParser(txt, target) {
@@ -386,7 +382,7 @@ import {measurePerf} from './performance.js';
     if (kind === 'comment-name-bulk') {
       const tokenIds = (control.dataset.tokenIds || '').split(',').filter(Boolean);
       const replacements = tokenIds.map(function (id) {
-        const token = currentCatalog && currentCatalog.tokensById[id];
+        const token = currentModel && currentModel.tokensById[id];
         return token ? { start: token.nameRange.start, end: token.nameRange.end, value: nextValue, expected: token.name } : null;
       }).filter(Boolean);
       applyReplacements(replacements, captureResourceViewState(control));
@@ -458,7 +454,7 @@ import {measurePerf} from './performance.js';
 
   function applyReplacements(replacements, viewState) {
     const txt = editor.getText();
-    const checked = validateReplacements(txt, currentCatalog && currentCatalog.generation, replacements);
+    const checked = validateReplacements(txt, currentModel && currentModel.generation, replacements);
     if (!checked.ok) {
       if (checked.reason === 'overlap') { setStatus('资源修改范围重叠，已取消', true); return; }
       if (checked.reason === 'empty') return;
@@ -492,672 +488,70 @@ import {measurePerf} from './performance.js';
     }, true);
   }
 
+  function deriveResourceView(model, resources) {
+    return { resources, errors: model.diagnostics };
+  }
+
   function rebuildResourceTree() {
-    if (!currentCatalog) return;
-    const tree=measurePerf('catalog.tree',()=>buildResourceTree(currentCatalog),{resources:currentCatalog.resources.length});
-    const html=renderCatalogSummary(currentCatalog)+renderTreeNode(tree,0); measurePerf('catalog.innerHTML',()=>{resourceList.innerHTML=html},{resources:currentCatalog.resources.length}); if(selectedResourceId){resourceList.querySelector('[data-resource-id="'+cssEscape(selectedResourceId)+'"]')?.classList.add('is-active')}
+    if (!currentModel) return;
+    const tree=measurePerf('model.tree',()=>buildResourceTree(currentModel,currentResourceBindings),{resources:currentResourceBindings.length});
+    const html=renderModelSummary(currentModel,currentResourceBindings)+renderTreeNode(tree,0); measurePerf('model.innerHTML',()=>{resourceList.innerHTML=html},{resources:currentResourceBindings.length}); if(selectedResourceId){resourceList.querySelector('[data-resource-id="'+cssEscape(selectedResourceId)+'"]')?.classList.add('is-active')}
   }
 
   function updateResourceList(bbcode) {
-    const next=measurePerf('catalog.parse',()=>parseResourceCatalog(bbcode||''),{length:(bbcode||'').length});
-    const nextFp=measurePerf('catalog.fingerprint',()=>catalogFingerprints(next),{resources:next.resources.length});
-    const previousFp=catalogFingerprintsCurrent; currentCatalog=next; catalogFingerprintsCurrent=nextFp;
-    editor.setDecorations(catalogDiagnosticRanges(next.errors,(bbcode||'').length)); resourceCount.textContent=String(next.resources.length);
-    if(previousFp&&previousFp.content===nextFp.content){if(previousFp.line!==nextFp.line)updateCatalogLines(next);return}
-    if(!next.resources.length&&!next.errors.length){resourceList.innerHTML='<div class="resource-empty">未发现资源</div>';return}
-    measurePerf('catalog.renderHTML',()=>rebuildResourceTree(),{resources:next.resources.length});
+    const nextModel=measurePerf('model.build',()=>buildBannerModel(bbcode||''),{length:(bbcode||'').length});
+    const nextResources=deriveResourceBindings(nextModel);
+    const nextFp=measurePerf('model.fingerprint',()=>catalogFingerprints(deriveResourceView(nextModel,nextResources)),{resources:nextResources.length});
+    const previousFp=catalogFingerprintsCurrent; currentModel=nextModel; currentResourceBindings=nextResources; catalogFingerprintsCurrent=nextFp;
+    editor.setDecorations(catalogDiagnosticRanges(nextModel.diagnostics,(bbcode||'').length)); resourceCount.textContent=String(nextResources.length);
+    if(previousFp&&previousFp.content===nextFp.content){if(previousFp.line!==nextFp.line)updateModelLines(nextModel,nextResources);return}
+    if(!nextResources.length&&!nextModel.diagnostics.length){resourceList.innerHTML='<div class="resource-empty">未发现资源</div>';return}
+    measurePerf('model.renderHTML',()=>rebuildResourceTree(),{resources:nextResources.length});
   }
-  function updateCatalogLines(catalog){
-    const byId=new Map(catalog.resources.map(r=>[r.stableId,r]));
+  function updateModelLines(model, resources){
+    const byId=new Map(resources.map(r=>[r.stableId,r]));
     resourceList.querySelectorAll('[data-locate-id]').forEach(button=>{const item=byId.get(button.dataset.locateId);if(item)button.textContent='L'+(item.line||'')});
-    const byError=new Map(catalog.errors.map(e=>[e.id,e])); resourceList.querySelectorAll('[data-locate-error]').forEach(button=>{const e=byError.get(button.dataset.locateError);if(e)button.textContent='第 '+e.line+' 行：'+e.message});
+    const byError=new Map(model.diagnostics.map(e=>[e.id,e])); resourceList.querySelectorAll('[data-locate-error]').forEach(button=>{const e=byError.get(button.dataset.locateError);if(e)button.textContent='第 '+e.line+' 行：'+e.message});
   }
 
-  function parseResourceCatalog(bbcode) {
-    const resources = [];
-    const errors = [];
-    const tokensById = Object.create(null);
-    const consumed = [];
-    const prefixStack = [];
-    const suffixStack = [];
-    const lineStarts=buildLineIndex(bbcode);
-    const lines = splitLinesWithOffsets(bbcode).map((x,index)=>({...x,line:index+1}));
-    const imageDefaults = [];
-    let tokenSeq = 0;
-    let resourceSeq = 0;
-
-    lines.forEach(function (lineInfo) {
-      const events = [];
-      const line = lineInfo.text;
-      const commentRegex = /(\[comment\s+\/\/\s*)([^\]]*)(\])/gi;
-      let match;
-
-      while ((match = commentRegex.exec(line))) {
-        const token = parseCommentToken(match, lineInfo.offset, tokenSeq++, lineInfo.line);
-        tokensById[token.id] = token;
-        if (token.mode === 'imageDefault') imageDefaults.push(token);
-        events.push({ kind: 'comment', index: match.index, token });
-      }
-
-      collectDybgEvents(line, lineInfo, events, bbcode);
-      collectUrlEvents(line, lineInfo, events, bbcode);
-      collectImgEvents(line, lineInfo, events, bbcode);
-      events.sort(function (a, b) {
-        if (a.index !== b.index) return a.index - b.index;
-        return a.kind === 'comment' ? -1 : 1;
-      });
-
-      let currentNameToken = null;
-      events.forEach(function (event) {
-        if (event.kind === 'comment') {
-          const token = event.token;
-          if (token.mode === 'imageDefault') {
-            return;
-          } else if (token.mode === 'prefixOpen') {
-            prefixStack.push(token);
-          } else if (token.mode === 'prefixClose') {
-            closeStack(prefixStack, token, '前缀目录', errors);
-          } else if (token.mode === 'suffixOpen') {
-            suffixStack.push(token);
-          } else if (token.mode === 'suffixClose') {
-            closeStack(suffixStack, token, '后缀目录', errors);
-          } else if (token.feature === 'text') {
-            currentNameToken = token;
-            const item = extractTextResource(bbcode, line, lineInfo, token, prefixStack, suffixStack, resourceSeq++);
-            resources.push(item);
-            consumed.push(item.range);
-          } else if (token.feature === 'attr') {
-            currentNameToken = token;
-            const item = extractAttributeResource(line, lineInfo, token, prefixStack, suffixStack, resourceSeq++);
-            resources.push(item);
-            if (item.range) consumed.push(item.range);
-          } else {
-            currentNameToken = token;
-          }
-          return;
-        }
-
-        if (event.kind === 'dybg') {
-          const item = createImageResource(event, currentNameToken, prefixStack, suffixStack, resourceSeq++);
-          resources.push(item);
-          consumed.push(item.range);
-        } else if (event.kind === 'img') {
-          const item = createSimpleResource('image', 'img', event, currentNameToken, prefixStack, suffixStack, resourceSeq++);
-          resources.push(item);
-          consumed.push(item.range);
-        } else if (event.kind === 'url') {
-          const item = createSimpleResource('url', 'url', event, currentNameToken, prefixStack, suffixStack, resourceSeq++);
-          resources.push(item);
-          consumed.push(item.range);
-        }
-      });
+  function buildResourceTree(model, resources) {
+    const modelRoot = model.rootBlock;
+    const root = { key: '', name: '', children: [], resources: [], tokenIds: new Set(), errors: model.diagnostics.slice(), sourceOrder: -1 };
+    const resourceByModelId = new Map();
+    resources.forEach(function(resource){
+      if(!resourceByModelId.has(resource.modelId)) resourceByModelId.set(resource.modelId, []);
+      resourceByModelId.get(resource.modelId).push(resource);
     });
-
-    prefixStack.slice().reverse().forEach(function (token) {
-      errors.push(makeError('前缀目录未闭合：' + token.name, token));
-    });
-    suffixStack.slice().reverse().forEach(function (token) {
-      errors.push(makeError('后缀目录未闭合：' + token.name, token));
-    });
-
-    collectUncategorized(bbcode, consumed, resources, resourceSeq, lineStarts);
-    applyImageDefaults(imageDefaults, resources, errors);
-    const generation = hashText(bbcode); const stableCounts=Object.create(null); resources.forEach(function(item){const base=stableResourceId(item,bbcode);const occurrence=stableCounts[base]||0;stableCounts[base]=occurrence+1;item.stableId=base+':'+occurrence}); return { resources, errors, tokensById, generation, snapshot: bbcode };
-  }
-
-  function stableResourceId(item, text) { const core=text.slice(item.range.start,item.range.end); return item.type+':'+item.sourceKind+':'+hashText(core)+':'+hashText(item.name||''); }
-
-  function splitLinesWithOffsets(text) {
-    const result = [];
-    const regex = /.*(?:\r?\n|$)/g;
-    let match;
-    while ((match = regex.exec(text))) {
-      if (!match[0] && match.index === text.length) break;
-      const raw = match[0];
-      result.push({ text: raw.replace(/\r?\n$/, ''), offset: match.index });
+    function projectLeaf(item, parentKey, sourceOrder) {
+      const kindKey = item.kind === 'StyleBlock' ? 'style' : 'slot:' + item.type;
+      const key = (parentKey ? parentKey + '/' : '') + kindKey + ':' + item.logicalId;
+      const tokenIds = new Set();
+      if (item.source.nameTokenId) tokenIds.add(item.source.nameTokenId);
+      if (item.source.pairedNameTokenId) tokenIds.add(item.source.pairedNameTokenId);
+      return {key, name:item.name, children:[], resources:(resourceByModelId.get(item.logicalId)||[]).slice(), tokenIds, errors:[], sourceOrder, isSystemUncategorized:false};
     }
-    return result;
-  }
-
-  function parseCommentToken(match, lineOffset, seq, lineNumber) {
-    const raw = match[2];
-    const rawStart = lineOffset + match.index + match[1].length;
-    const leading = raw.match(/^\s*/)[0].length;
-    const trailing = raw.match(/\s*$/)[0].length;
-    const trimmed = raw.slice(leading, raw.length - trailing);
-    const trimmedStart = rawStart + leading;
-    let mode = 'name';
-    let markerStart = '';
-    let markerEnd = '';
-    let feature = '';
-    let nameStartRel = 0;
-    let nameEndRel = trimmed.length;
-
-    const imageDefaultMatch = /^#([^!\]=]+)!\u56fe\u7247\s*=\s*(.*)$/.exec(trimmed);
-    let defaultValue = '';
-    if (imageDefaultMatch) {
-      mode = 'imageDefault';
-      nameStartRel = trimmed.indexOf(imageDefaultMatch[1]);
-      nameEndRel = nameStartRel + imageDefaultMatch[1].length;
-      defaultValue = imageDefaultMatch[2];
-    } else if (trimmed.startsWith('++')) {
-      mode = 'prefixOpen';
-      markerStart = '++';
-      nameStartRel = 2;
-    } else if (trimmed.startsWith('--')) {
-      mode = 'prefixClose';
-      markerStart = '--';
-      nameStartRel = 2;
-    } else if (trimmed.endsWith('++')) {
-      mode = 'suffixOpen';
-      markerEnd = '++';
-      nameEndRel = trimmed.length - 2;
-    } else if (trimmed.endsWith('--')) {
-      mode = 'suffixClose';
-      markerEnd = '--';
-      nameEndRel = trimmed.length - 2;
+    function projectBlock(block, parentKey, sourceOrder) {
+      const key = block.virtual ? SYSTEM_UNCATEGORIZED_KEY : (parentKey ? parentKey + '/' : '') + 'block:' + block.logicalId;
+      const node = {key, name:block.name, children:[], resources:[], tokenIds:new Set(), errors:[], sourceOrder, isSystemUncategorized:block.virtual};
+      block.sourceOccurrences.forEach(function(source){if(source.tokenId)node.tokenIds.add(source.tokenId);if(source.pairedTokenId)node.tokenIds.add(source.pairedTokenId)});
+      block.blocks.forEach(function(child,index){node.children.push(projectBlock(child,key,index))});
+      block.slots.forEach(function(slot,index){node.children.push(projectLeaf(slot,key,block.blocks.length+index))});
+      block.styleBlocks.forEach(function(style,index){node.children.push(projectLeaf(style,key,block.blocks.length+block.slots.length+index))});
+      return node;
     }
-
-    const featureIndex = trimmed.indexOf('!', nameStartRel);
-    if (featureIndex !== -1 && featureIndex < nameEndRel) {
-      const featureName = trimmed.slice(featureIndex + 1, nameEndRel).trim();
-      if (featureName === '文本') feature = 'text';
-      if (featureName === '属性') feature = 'attr';
-      if (feature) nameEndRel = featureIndex;
-    }
-
-    while (nameStartRel < nameEndRel && /\s/.test(trimmed[nameStartRel])) nameStartRel += 1;
-    while (nameEndRel > nameStartRel && /\s/.test(trimmed[nameEndRel - 1])) nameEndRel -= 1;
-
-    const name = trimmed.slice(nameStartRel, nameEndRel);
-    return {
-      id: 'c' + seq,
-      mode,
-      markerStart,
-      markerEnd,
-      feature,
-      name,
-      defaultValue,
-      raw,
-      line: lineNumber,
-      range: { start: lineOffset + match.index, end: lineOffset + match.index + match[0].length },
-      nameRange: { start: trimmedStart + nameStartRel, end: trimmedStart + nameEndRel }
-    };
-  }
-
-  function closeStack(stack, closeToken, label, errors) {
-    if (!stack.length) {
-      errors.push(makeError(label + '关闭没有对应开始：' + closeToken.name, closeToken));
-      return;
-    }
-    const top = stack[stack.length - 1];
-    if (top.name === closeToken.name) {
-      stack.pop();
-      pairTokens(top, closeToken);
-      return;
-    }
-    const foundIndex = stack.map(function (token) { return token.name; }).lastIndexOf(closeToken.name);
-    if (foundIndex === -1) {
-      errors.push(makeError(label + '关闭名称不匹配：' + closeToken.name + '，当前为 ' + top.name, closeToken));
-      return;
-    }
-    errors.push(makeError(label + '交叉关闭：' + closeToken.name + '，当前为 ' + top.name, closeToken));
-    const openToken = stack.splice(foundIndex, 1)[0];
-    pairTokens(openToken, closeToken);
-  }
-
-  function pairTokens(openToken, closeToken) {
-    openToken.pairedTokenId = closeToken.id;
-    closeToken.pairedTokenId = openToken.id;
-  }
-
-  function collectDybgEvents(line, lineInfo, events, bbcode) {
-    const regex = /dybg\s+([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^\]\s]*)/gi;
-    let match;
-    while ((match = regex.exec(line))) {
-      const fields = [];
-      let searchAt = match.index + match[0].indexOf(match[1]);
-      for (let i = 1; i <= 6; i += 1) {
-        const value = match[i];
-        const relStart = line.indexOf(value, searchAt);
-        const relEnd = relStart + value.length;
-        fields.push({ value, range: { start: lineInfo.offset + relStart, end: lineInfo.offset + relEnd } });
-        searchAt = relEnd + 1;
-      }
-      events.push({
-        kind: 'dybg',
-        index: match.index,
-        range: { start: lineInfo.offset + match.index, end: lineInfo.offset + match.index + match[0].length },
-        fields,
-        line: lineInfo.line
-      });
-    }
-  }
-
-  function collectUrlEvents(line, lineInfo, events, bbcode) {
-    const regex = /\[url=([^\]]*)\]/gi;
-    let match;
-    while ((match = regex.exec(line))) {
-      const valueStart = lineInfo.offset + match.index + 5;
-      events.push({
-        kind: 'url',
-        index: match.index,
-        value: match[1],
-        valueRange: { start: valueStart, end: valueStart + match[1].length },
-        range: { start: lineInfo.offset + match.index, end: lineInfo.offset + match.index + match[0].length },
-        line: lineInfo.line
-      });
-    }
-  }
-
-  function collectImgEvents(line, lineInfo, events, bbcode) {
-    const regex = /\[img[^\]]*\]([\s\S]*?)\[\/img\]/gi;
-    let match;
-    while ((match = regex.exec(line))) {
-      const openEnd = match[0].indexOf(']') + 1;
-      const valueStart = lineInfo.offset + match.index + openEnd;
-      events.push({
-        kind: 'img',
-        index: match.index,
-        value: match[1],
-        valueRange: { start: valueStart, end: valueStart + match[1].length },
-        range: { start: lineInfo.offset + match.index, end: lineInfo.offset + match.index + match[0].length },
-        line: lineInfo.line
-      });
-    }
-  }
-
-  function extractTextResource(bbcode, line, lineInfo, token, prefixStack, suffixStack, seq) {
-    const localTokenStart = token.range.start - lineInfo.offset;
-    const localStart = token.range.end - lineInfo.offset;
-    const openStyles = collectOpenStyleTags(line.slice(0, localTokenStart), lineInfo.offset);
-    const valueStart = token.range.end;
-    const valueEndLocal = findTextContainerEnd(line, localStart, openStyles.length);
-    const valueEnd = valueEndLocal === -1 ? valueStart : lineInfo.offset + valueEndLocal;
-    const item = createBaseResource('text', '\u6587\u672c', token, prefixStack, suffixStack, seq);
-    item.value = bbcode.slice(valueStart, valueEnd);
-    item.valueRange = { start: valueStart, end: valueEnd };
-    item.range = { start: token.range.start, end: valueEnd };
-    item.textStyles = extractTextStyleFields(openStyles);
-    if (valueEndLocal === -1) item.errors.push('\u672a\u627e\u5230\u5305\u88f9\u6587\u672c\u7684 style \u95ed\u5408\u6807\u7b7e');
-    return item;
-  }
-
-  function collectOpenStyleTags(prefix, lineOffset) {
-    const stack = [];
-    const regex = /\[(\/?)style(?:\s+([^\]]*))?\]/gi;
-    let match;
-    while ((match = regex.exec(prefix))) {
-      if (match[1]) stack.pop();
-      else stack.push({ content: match[2] || '', contentStart: lineOffset + match.index + match[0].indexOf(match[2] || '') });
-    }
-    return stack;
-  }
-
-  function findTextContainerEnd(line, localStart, initialDepth) {
-    if (!initialDepth) return -1;
-    const regex = /\[(\/?)style(?:\s+[^\]]*)?\]/gi;
-    regex.lastIndex = localStart;
-    let depth = initialDepth;
-    let match;
-    while ((match = regex.exec(line))) {
-      if (match[1]) {
-        depth -= 1;
-        if (depth < initialDepth) return match.index;
-      } else {
-        depth += 1;
-      }
-    }
-    return -1;
-  }
-
-  function extractTextStyleFields(openStyles) {
-    const fields = [];
-    openStyles.forEach(function (style) {
-      const tokens = tokenizeTagContent(style.content, style.contentStart);
-      for (let index = 0; index < tokens.length; index += 1) {
-        const key = tokens[index].value.toLowerCase();
-        const value = tokens[index + 1];
-        if (key === 'color' && value && /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(value.value)) {
-          fields.push({ key: 'color', label: '\u6587\u5b57\u989c\u8272', value: value.value, range: value.range, kind: 'text-color' });
-          index += 1;
-        } else if (key === 'font' && value && /^(?:\d+(?:\.\d+)?|\.\d+)$/.test(value.value) && Number(value.value) > 0) {
-          fields.push({ key: 'font', label: '\u5b57\u53f7 (em)', value: value.value, range: value.range, kind: 'number' });
-          index += 1;
-        }
-      }
-    });
-    return fields;
-  }
-
-  function extractAttributeResource(line, lineInfo, token, prefixStack, suffixStack, seq) {
-    const localStart = token.range.end - lineInfo.offset;
-    const rest = line.slice(localStart);
-    const match = /\[(?!\/)(?!comment\b)([^\]]*)\]/i.exec(rest);
-    const item = createBaseResource('attr', '属性', token, prefixStack, suffixStack, seq);
-    if (!match) {
-      item.value = '';
-      item.valueRange = { start: token.range.end, end: token.range.end };
-      item.range = { start: token.range.start, end: token.range.end };
-      item.errors.push('未找到 !属性 后面的属性标签');
-      return item;
-    }
-
-    const tagStart = token.range.end + match.index;
-    const contentStart = tagStart + 1;
-    const contentEnd = contentStart + match[1].length;
-    const parts = match[1].trim().split(/\s+/);
-    item.tagName = parts.shift() || '';
-    item.value = match[1];
-    item.valueRange = { start: contentStart, end: contentEnd };
-    item.range = { start: tagStart, end: tagStart + match[0].length };
-    item.fields = parseKnownAttributes(match[1], contentStart);
-    item.attributes = item.fields.map(field=>({key:field.key,value:field.value,label:field.label,range:field.range}));
-    item.colors = findColorRanges(match[1], contentStart);
-    return item;
-  }
-
-  function parseAttributes(content, contentStart) {
-    const fields = parseKnownAttributes(content, contentStart);
-    return fields.map(function (field) {
-      return { key: field.key, value: field.value, label: field.label, range: field.range };
-    });
-  }
-
-  function parseKnownAttributes(content, contentStart) {
-    const tokens = tokenizeTagContent(content, contentStart);
-    if (!tokens.length) return [];
-    const tagName = tokens[0].value.toLowerCase();
-    const fields = [];
-    let index = 1;
-
-    function addField(key, label, token, kind) {
-      if (!token) return;
-      fields.push({ key, label, value: token.value, range: token.range, kind: kind || 'text' });
-    }
-
-    function addSequence(key, labels, kind) {
-      labels.forEach(function (label) {
-        addField(key, label, tokens[index++], kind);
-      });
-    }
-
-    while (index < tokens.length) {
-      const keyToken = tokens[index++];
-      const key = keyToken.value.toLowerCase();
-      if (tagName === 'fixsize') {
-        if (key === 'width') addSequence(key, ['宽度下限', '宽度上限']);
-        else if (key === 'height') addSequence(key, ['高度']);
-        else if (key === 'background') addSequence(key, ['外背景色', '内背景色'], 'color');
-        else addField(key, keyToken.value, tokens[index++]);
-        continue;
-      }
-
-      if (key === 'filter-drop-shadow') {
-        const valueToken = tokens[index++];
-        if (valueToken) {
-          const parts = valueToken.value.split(';');
-          let cursor = valueToken.range.start;
-          const color = /#[0-9a-f]{6}(?:[0-9a-f]{2})?/i.exec(parts[0] || '');
-          if (color) {
-            const start = valueToken.range.start + color.index;
-            fields.push({ key, label: '阴影颜色', value: color[0], range: { start, end: start + color[0].length }, kind: 'color' });
-          }
-          ['阴影X', '阴影Y', '阴影模糊'].forEach(function (label, labelIndex) {
-            const partIndex = labelIndex + 1;
-            if (parts[partIndex] == null) return;
-            cursor = valueToken.range.start + parts.slice(0, partIndex).join(';').length + 1;
-            const part = parts[partIndex];
-            fields.push({ key, label, value: part, range: { start: cursor, end: cursor + part.length }, kind: 'text' });
-          });
-        }
-      } else if (key === 'dybg') {
-        const valueToken = tokens[index++];
-        if (valueToken) {
-          const parts = valueToken.value.split(';');
-          const labels = ['缩放', '位置X', '位置Y', '活动量X', '活动量Y', '图片链接'];
-          let cursor = valueToken.range.start;
-          parts.forEach(function (part, partIndex) {
-            fields.push({ key, label: labels[partIndex] || ('dybg-' + partIndex), value: part, range: { start: cursor, end: cursor + part.length }, kind: partIndex === 5 ? 'url' : 'text' });
-            cursor += part.length + 1;
-          });
-        }
-      } else if (key === 'background' || key === 'color') {
-        addField(key, key === 'background' ? '背景色' : '文字颜色', tokens[index++], 'color');
-      } else if (key === 'width' || key === 'height' || key === 'border-radius' || key === 'line-height' || key === 'left' || key === 'right' || key === 'top' || key === 'bottom' || key === 'rotate' || key === 'font' || key === 'align') {
-        addField(key, keyToken.value, tokens[index++]);
-      } else {
-        addField(key, keyToken.value, tokens[index++]);
-      }
-    }
-    return fields;
-  }
-
-  function tokenizeTagContent(content, contentStart) {
-    const tokens = [];
-    const regex = /\S+/g;
-    let match;
-    while ((match = regex.exec(content))) {
-      tokens.push({ value: match[0], range: { start: contentStart + match.index, end: contentStart + match.index + match[0].length } });
-    }
-    return tokens;
-  }
-
-  function findColorRanges(content, contentStart) {
-    const colors = [];
-    const regex = /#([0-9a-f]{6})([0-9a-f]{2})?/gi;
-    let match;
-    while ((match = regex.exec(content))) {
-      colors.push({
-        value: '#' + match[1],
-        alpha: match[2] || '',
-        range: { start: contentStart + match.index, end: contentStart + match.index + match[0].length }
-      });
-    }
-    return colors;
-  }
-
-  function createImageResource(event, nameToken, prefixStack, suffixStack, seq) {
-    const item = createBaseResource('image', 'dybg', nameToken, prefixStack, suffixStack, seq);
-    item.params = [
-      { label: '缩放', field: event.fields[0] },
-      { label: '位置X', field: event.fields[1] },
-      { label: '位置Y', field: event.fields[2] },
-      { label: '活动量X', field: event.fields[3] },
-      { label: '活动量Y', field: event.fields[4] }
-    ];
-    item.url = event.fields[5].value;
-    item.urlRange = event.fields[5].range;
-    item.value = item.url;
-    item.range = event.range;
-    item.line = event.line;
-    return item;
-  }
-
-  function createSimpleResource(type, sourceKind, event, nameToken, prefixStack, suffixStack, seq) {
-    const item = createBaseResource(type, sourceKind, nameToken, prefixStack, suffixStack, seq);
-    item.value = event.value;
-    item.url = event.value;
-    item.valueRange = event.valueRange;
-    item.urlRange = event.valueRange;
-    item.range = event.range;
-    item.line = event.line;
-    return item;
-  }
-
-  function createBaseResource(type, sourceKind, nameToken, prefixStack, suffixStack, seq) {
-    const segmentTokens = [];
-    const prefixParts = prefixStack.map(function (token) {
-      segmentTokens.push(token.id);
-      return token.name;
-    });
-    const suffixTokens = suffixStack.slice().reverse();
-    const suffixParts = suffixTokens.map(function (token) {
-      segmentTokens.push(token.id);
-      return token.name;
-    });
-    const hasName = Boolean(nameToken && nameToken.name);
-    const name = hasName ? nameToken.name : UNCATEGORIZED;
-    const parts = hasName ? prefixParts.concat([name], suffixParts) : [UNCATEGORIZED];
-    const pathTokenIds = hasName ? prefixStack.map(function (token) { return token.id; }).concat([nameToken.id], suffixTokens.map(function (token) { return token.id; })) : [];
-    return {
-      id: 'r' + seq,
-      type,
-      sourceKind,
-      name,
-      nameTokenId: nameToken ? nameToken.id : '',
-      pathParts: parts,
-      pathTokenIds,
-      pathKeys: hasName ? pathTokenIds.map(function (id, index) { return id || ('name:' + parts[index]); }) : [SYSTEM_UNCATEGORIZED_KEY],
-      path: '\\' + parts.join('\\'),
-      line: nameToken ? nameToken.line : 0,
-      errors: []
-    };
-  }
-
-  function collectUncategorized(bbcode, consumed, resources, resourceSeq, lineStarts) {
-    const ranges = mergeIntervals(consumed);
-    const addIfFree = function (type, sourceKind, start, end, value, valueStart, valueEnd) {
-      if (overlapsIntervals(ranges,start,end)) return;
-      const item = {
-        id: 'r' + resourceSeq++,
-        type,
-        sourceKind,
-        name: UNCATEGORIZED,
-        pathParts: [UNCATEGORIZED],
-        pathTokenIds: [],
-        pathKeys: [SYSTEM_UNCATEGORIZED_KEY],
-        path: '\\' + UNCATEGORIZED,
-        line: lineNumberAt(lineStarts,start),
-        value,
-        url: value,
-        valueRange: { start: valueStart, end: valueEnd },
-        urlRange: { start: valueStart, end: valueEnd },
-        range: { start, end },
-        errors: []
-      };
-      resources.push(item);
-      ranges.splice(0,ranges.length,...mergeIntervals(ranges.concat(item.range)));
-    };
-
-    let match;
-    const dybgTag = /dybg\s+([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^;\]]*);([^\]\s]*)/gi;
-    while ((match = dybgTag.exec(bbcode))) {
-      const fields = [];
-      let searchAt = match.index + match[0].indexOf(match[1]);
-      for (let i = 1; i <= 6; i += 1) {
-        const value = match[i];
-        const relStart = bbcode.indexOf(value, searchAt);
-        const relEnd = relStart + value.length;
-        fields.push({ value, range: { start: relStart, end: relEnd } });
-        searchAt = relEnd + 1;
-      }
-      if (!overlapsIntervals(ranges,match.index,match.index+match[0].length)) {
-        const item = {
-          id: 'r' + resourceSeq++,
-          type: 'image',
-          sourceKind: 'dybg',
-          name: UNCATEGORIZED,
-          pathParts: [UNCATEGORIZED],
-          pathTokenIds: [],
-          pathKeys: [SYSTEM_UNCATEGORIZED_KEY],
-          path: '\\' + UNCATEGORIZED,
-          line: lineNumberAt(lineStarts,match.index),
-          params: [
-            { label: '缩放', field: fields[0] },
-            { label: '位置X', field: fields[1] },
-            { label: '位置Y', field: fields[2] },
-            { label: '活动量X', field: fields[3] },
-            { label: '活动量Y', field: fields[4] }
-          ],
-          url: fields[5].value,
-          urlRange: fields[5].range,
-          value: fields[5].value,
-          range: { start: match.index, end: match.index + match[0].length },
-          errors: []
-        };
-        resources.push(item);
-        ranges.splice(0,ranges.length,...mergeIntervals(ranges.concat(item.range)));
-      }
-    }
-
-    const imgTag = /\[img[^\]]*\]([\s\S]*?)\[\/img\]/gi;
-    while ((match = imgTag.exec(bbcode))) {
-      const openEnd = match[0].indexOf(']') + 1;
-      addIfFree('image', 'img', match.index, match.index + match[0].length, match[1], match.index + openEnd, match.index + openEnd + match[1].length);
-    }
-
-    const urlTag = /\[url=([^\]]*)\]/gi;
-    while ((match = urlTag.exec(bbcode))) {
-      addIfFree('url', 'url', match.index, match.index + match[0].length, match[1], match.index + 5, match.index + 5 + match[1].length);
-    }
-  }
-
-  function applyImageDefaults(declarations, resources, errors) {
-    const byName = Object.create(null);
-    declarations.forEach(function (declaration) {
-      if (!byName[declaration.name]) byName[declaration.name] = [];
-      byName[declaration.name].push(declaration);
-    });
-    const resourcesByName=Object.create(null); resources.forEach(function(item){if(item.type!=='image')return;const name=item.pathParts[item.pathParts.length-1];(resourcesByName[name]||(resourcesByName[name]=[])).push(item)});
-    Object.keys(byName).forEach(function (name) {
-      const matches = byName[name];
-      if (matches.length > 1) {
-        matches.forEach(function (token) { errors.push(makeError('\u91cd\u590d\u7684\u56fe\u7247\u9ed8\u8ba4\u58f0\u660e\uff1a' + name, token)); });
-        return;
-      }
-      (resourcesByName[name]||[]).forEach(function(item){item.defaultUrl=matches[0].defaultValue});
-    });
-  }
-
-  function makeError(message, token) {
-    return {
-      id: 'e' + token.id,
-      message,
-      line: token.line,
-      pathParts: [UNCATEGORIZED],
-      path: '\\' + UNCATEGORIZED,
-      from: (token.fullRange || token.nameRange || token.range).start,
-      to: (token.fullRange || token.nameRange || token.range).end,
-      severity: 'error'
-    };
-  }
-
-  function buildResourceTree(catalog) {
-    const root = { key: '', name: '', children: [], childMap: Object.create(null), resources: [], tokenIds: new Set(), errors: [], sourceOrder: -1 };
-    catalog.resources.forEach(function (item, resourceIndex) {
-      let node = root;
-      item.pathParts.forEach(function (part, index) {
-        const isSystemUncategorized = item.pathKeys && item.pathKeys[index] === SYSTEM_UNCATEGORIZED_KEY;
-        const segmentKey = isSystemUncategorized ? SYSTEM_UNCATEGORIZED_KEY : ('name:' + part);
-        const fullKey = (node.key ? node.key + '/' : '') + segmentKey;
-        if (!node.childMap[segmentKey]) {
-          const child = { key: fullKey, name: part, children: [], childMap: Object.create(null), resources: [], tokenIds: new Set(), errors: [], sourceOrder: resourceIndex, isSystemUncategorized: fullKey === SYSTEM_UNCATEGORIZED_KEY };
-          node.childMap[segmentKey] = child;
-          node.children.push(child);
-        }
-        node = node.childMap[segmentKey];
-        const tokenId = item.pathTokenIds[index];
-        if (tokenId) {
-          node.tokenIds.add(tokenId);
-          const token = catalog.tokensById[tokenId];
-          if (token && token.pairedTokenId) node.tokenIds.add(token.pairedTokenId);
-        }
-      });
-      node.resources.push(item);
-    });
-    catalog.errors.forEach(function (error) { root.errors.push(error); });
+    modelRoot.blocks.forEach(function(block,index){root.children.push(projectBlock(block,'',index))});
+    modelRoot.slots.forEach(function(slot,index){root.children.push(projectLeaf(slot,'',modelRoot.blocks.length+index))});
+    modelRoot.styleBlocks.forEach(function(style,index){root.children.push(projectLeaf(style,'',modelRoot.blocks.length+modelRoot.slots.length+index))});
     cacheResourceCounts(root); return root;
   }
-
-  function renderCatalogSummary(catalog) {
-    const errorHtml = catalog.errors.length
-      ? '<div class="resource-errors">' + catalog.errors.map(function (error) {
+  function renderModelSummary(model, resources) {
+    const errorHtml = model.diagnostics.length
+      ? '<div class="resource-errors">' + model.diagnostics.map(function (error) {
         const locate = Number.isInteger(error.from) && Number.isInteger(error.to) && error.from < error.to ? ' data-locate-error="' + escapeHtml(error.id) + '"' : '';
         return '<button type="button" class="resource-error"' + locate + '>第 ' + escapeHtml(error.line) + ' 行：' + escapeHtml(error.message) + '</button>';
       }).join('') + '</div>'
       : '';
-    return '<div class="catalog-summary">资源 ' + catalog.resources.length + ' 项，提示 ' + catalog.errors.length + ' 项</div>' + errorHtml;
+    return '<div class="catalog-summary">共 ' + resources.length + ' 个资源，' + model.diagnostics.length + ' 个提示</div>' + errorHtml;
   }
 
   function renderTreeNode(node, depth) {
@@ -1241,7 +635,7 @@ import {measurePerf} from './performance.js';
 
   function renderColorField(label, value, range) {
     const parsed = parseColorValue(value || '');
-    return '<label class="color-field">' + escapeHtml(label) + '<span class="color-edit"><input class="color-swatch" type="color" data-edit-kind="color" data-focus-key="range:' + range.start + ':' + range.end + ':color" data-start="' + range.start + '" data-end="' + range.end + '" data-expected="' + escapeHtml(value) + '" data-alpha="' + escapeHtml(parsed.alpha) + '" value="' + escapeHtml(parsed.hex) + '"><input class="color-hex-input" data-edit-kind="range" data-color-alpha="1" data-focus-key="range:' + range.start + ':' + range.end + ':hex" data-start="' + range.start + '" data-end="' + range.end + '" data-expected="' + escapeHtml(value || '') + '" value="' + escapeHtml(parsed.full) + '" maxlength="9"></span></label>';
+    return '<div class="color-field"><span class="color-field-label">' + escapeHtml(label) + '</span><span class="color-edit"><input class="color-swatch" type="color" data-edit-kind="color" data-focus-key="range:' + range.start + ':' + range.end + ':color" data-start="' + range.start + '" data-end="' + range.end + '" data-expected="' + escapeHtml(value) + '" data-alpha="' + escapeHtml(parsed.alpha) + '" value="' + escapeHtml(parsed.hex) + '"><input class="color-hex-input" data-edit-kind="range" data-color-alpha="1" data-focus-key="range:' + range.start + ':' + range.end + ':hex" data-start="' + range.start + '" data-end="' + range.end + '" data-expected="' + escapeHtml(value || '') + '" value="' + escapeHtml(parsed.full) + '" maxlength="9"></span></div>';
   }
 
   function parseColorValue(value) {
@@ -1271,12 +665,6 @@ import {measurePerf} from './performance.js';
     return '<label class="text-resource-field">' + escapeHtml(label) + '<span class="resource-value-control"><textarea data-edit-kind="range" data-focus-key="range:' + range.start + ':' + range.end + ':textarea" data-start="' + range.start + '" data-end="' + range.end + '" data-expected="' + escapeHtml(value || '') + '">' + escapeHtml(value || '') + '</textarea>' + renderValueActions(value || '', range, options) + '</span></label>';
   }
 
-  function countResources(node) {
-    return node.resources.length + node.children.reduce(function (sum, child) {
-      return sum + child.resourceCount;
-    }, 0);
-  }
-
   function naturalCompare(a, b) {
     return a.localeCompare(b, 'zh-Hans-CN', { numeric: true });
   }
@@ -1287,10 +675,6 @@ import {measurePerf} from './performance.js';
     if (value.startsWith('./')) return ATTACH_BASE + '/' + value.slice(2);
     if (value.startsWith('/attachments/')) return 'https://img.nga.178.com' + value;
     return value;
-  }
-
-  function lineNumberFromOffset(text, offset) {
-    return text.slice(0, offset).split(/\r?\n/).length;
   }
 
   function escapeHtml(value) {
@@ -1308,7 +692,7 @@ import {measurePerf} from './performance.js';
   loadPostButton.addEventListener('click', loadPostFromUrl);
   savePostButton.addEventListener('click', saveCurrentPost);
   resourceSort.value = resourceSortMode;
-  resourceList.addEventListener('click', function(event){ if(!currentCatalog)return; const errorButton=event.target.closest('[data-locate-error]'); if(errorButton){const issue=currentCatalog.errors.find(function(e){return e.id===errorButton.dataset.locateError});if(issue&&Number.isInteger(issue.from)&&Number.isInteger(issue.to))editor.setSelection(issue.from,issue.to,true);return;} const locate=event.target.closest('[data-locate-id]'); if(!locate)return; const item=currentCatalog.resources.find(function(r){return r.stableId===locate.dataset.locateId}); if(item){selectedResourceId=item.stableId;editor.setSelection(item.range.start,item.range.end,true);} });
+  resourceList.addEventListener('click', function(event){ if(!currentModel)return; const errorButton=event.target.closest('[data-locate-error]'); if(errorButton){const issue=currentModel.diagnostics.find(function(e){return e.id===errorButton.dataset.locateError});if(issue&&Number.isInteger(issue.from)&&Number.isInteger(issue.to))editor.setSelection(issue.from,issue.to,true);return;} const locate=event.target.closest('[data-locate-id]'); if(!locate)return; const item=currentResourceBindings.find(function(r){return r.stableId===locate.dataset.locateId}); if(item){selectedResourceId=item.stableId;editor.setSelection(item.range.start,item.range.end,true);} });
 
   init().catch(function (error) {
     setStatus('初始化失败：' + error.message, true);
