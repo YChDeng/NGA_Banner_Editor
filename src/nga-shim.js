@@ -29,6 +29,13 @@
     return win.__NGA_REMOTE_ATTACH_BASE || 'https://img.nga.178.com/attachments';
   };
 
+  commonui.ifUrlAttach = commonui.ifUrlAttach || function (value) {
+    const url = String(value == null ? '' : value);
+    const match = url.match(/^https?:\/\/(?:img\d?\.ngacn\.cc|img\d?\.nga\.cn|ngaimg\.178\.com|img\d?\.nga\.178\.com|img\.nga\.donews\.com|img\.nga\.bnbsky\.com|user-file\.nga\.178\.com)\/(attachments\/)?/i);
+    return match ? (match[1] ? 2 : 1) : 0;
+  };
+  commonui.iUrlAttach = commonui.iUrlAttach || commonui.ifUrlAttach;
+
 
 
   commonui.hexToRgba = commonui.hexToRgba || function (hex) {

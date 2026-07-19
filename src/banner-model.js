@@ -23,7 +23,9 @@ export const SYSTEM_UNCATEGORIZED_KEY = '__system_uncategorized__';
      let match;
 
      while ((match = commentRegex.exec(line))) {
-       const token = parseCommentToken(match, lineInfo.offset, tokenSeq++, lineInfo.line);
+       const token = parseCommentToken(match, lineInfo.offset, tokenSeq, lineInfo.line);
+       if (token.kind !== 'extension') continue;
+       tokenSeq += 1;
        tokensById[token.id] = token;
        if (token.mode === 'imageDefault') imageDefaults.push(token);
        events.push({ kind: 'comment', index: match.index, token });
@@ -116,51 +118,58 @@ export const SYSTEM_UNCATEGORIZED_KEY = '__system_uncategorized__';
    const trailing = raw.match(/\s*$/)[0].length;
    const trimmed = raw.slice(leading, raw.length - trailing);
    const trimmedStart = rawStart + leading;
+   if (!trimmed.startsWith('$')) return { kind: 'ordinary' };
+   const extensionRaw = trimmed.slice(1);
+   const extensionLeading = extensionRaw.match(/^\s*/)[0].length;
+   const extensionTrailing = extensionRaw.match(/\s*$/)[0].length;
+   const content = extensionRaw.slice(extensionLeading, extensionRaw.length - extensionTrailing);
+   const contentStart = trimmedStart + 1 + extensionLeading;
    let mode = 'name';
    let markerStart = '';
    let markerEnd = '';
    let feature = '';
    let nameStartRel = 0;
-   let nameEndRel = trimmed.length;
+   let nameEndRel = content.length;
 
-   const imageDefaultMatch = /^#([^!\]=]+)!\u56fe\u7247\s*=\s*(.*)$/.exec(trimmed);
+   const imageDefaultMatch = /^#([^!\]=]+)!\u56fe\u7247\s*=\s*(.*)$/.exec(content);
    let defaultValue = '';
    if (imageDefaultMatch) {
      mode = 'imageDefault';
-     nameStartRel = trimmed.indexOf(imageDefaultMatch[1]);
+     nameStartRel = content.indexOf(imageDefaultMatch[1]);
      nameEndRel = nameStartRel + imageDefaultMatch[1].length;
      defaultValue = imageDefaultMatch[2];
-   } else if (trimmed.startsWith('++')) {
+   } else if (content.startsWith('++')) {
      mode = 'prefixOpen';
      markerStart = '++';
      nameStartRel = 2;
-   } else if (trimmed.startsWith('--')) {
+   } else if (content.startsWith('--')) {
      mode = 'prefixClose';
      markerStart = '--';
      nameStartRel = 2;
-   } else if (trimmed.endsWith('++')) {
+   } else if (content.endsWith('++')) {
      mode = 'suffixOpen';
      markerEnd = '++';
-     nameEndRel = trimmed.length - 2;
-   } else if (trimmed.endsWith('--')) {
+     nameEndRel = content.length - 2;
+   } else if (content.endsWith('--')) {
      mode = 'suffixClose';
      markerEnd = '--';
-     nameEndRel = trimmed.length - 2;
+     nameEndRel = content.length - 2;
    }
 
-   const featureIndex = trimmed.indexOf('!', nameStartRel);
+   const featureIndex = content.indexOf('!', nameStartRel);
    if (featureIndex !== -1 && featureIndex < nameEndRel) {
-     const featureName = trimmed.slice(featureIndex + 1, nameEndRel).trim();
-     if (featureName === '文本') feature = 'text';
-     if (featureName === '属性') feature = 'attr';
+     const featureName = content.slice(featureIndex + 1, nameEndRel).trim();
+     if (featureName === '\u6587\u672c') feature = 'text';
+     if (featureName === '\u5c5e\u6027') feature = 'attr';
      if (feature) nameEndRel = featureIndex;
    }
 
-   while (nameStartRel < nameEndRel && /\s/.test(trimmed[nameStartRel])) nameStartRel += 1;
-   while (nameEndRel > nameStartRel && /\s/.test(trimmed[nameEndRel - 1])) nameEndRel -= 1;
+   while (nameStartRel < nameEndRel && /\s/.test(content[nameStartRel])) nameStartRel += 1;
+   while (nameEndRel > nameStartRel && /\s/.test(content[nameEndRel - 1])) nameEndRel -= 1;
 
-   const name = trimmed.slice(nameStartRel, nameEndRel);
+   const name = content.slice(nameStartRel, nameEndRel);
    return {
+     kind: 'extension',
      id: 'c' + seq,
      mode,
      markerStart,
@@ -171,10 +180,9 @@ export const SYSTEM_UNCATEGORIZED_KEY = '__system_uncategorized__';
      raw,
      line: lineNumber,
      range: { start: lineOffset + match.index, end: lineOffset + match.index + match[0].length },
-     nameRange: { start: trimmedStart + nameStartRel, end: trimmedStart + nameEndRel }
+     nameRange: { start: contentStart + nameStartRel, end: contentStart + nameEndRel }
    };
  }
-
  function closeStack(stack, closeToken, label, errors) {
    if (!stack.length) {
      errors.push(makeError(label + '关闭没有对应开始：' + closeToken.name, closeToken));

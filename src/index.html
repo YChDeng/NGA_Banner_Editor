@@ -2,61 +2,54 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: data: about:; img-src 'self' file: data: about: http: https:; style-src 'self' 'unsafe-inline' file:; script-src 'self' 'unsafe-inline' file:; connect-src 'self' file:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: data: about:; worker-src 'self' blob:; img-src 'self' file: data: about: http: https:; style-src 'self' 'unsafe-inline' file:; script-src 'self' 'unsafe-inline' file:; connect-src 'self' file:;">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NGA Banner Editor</title>
   <link rel="stylesheet" href="../img4.nga.178.com/ngabbs/nga_classic/css_default.css">
   <link rel="stylesheet" href="./app.css">
+  <link rel="stylesheet" href="./image-manager.css">
+  <link rel="stylesheet" href="../dist/renderer.css">
 </head>
 <body>
   <main class="app-shell">
+    <header class="global-bar"><div class="app-mark">NGA</div><div class="global-account"><span id="authStatus">NGA</span><button id="loginNga" type="button">&#30331;&#24405;</button></div></header>
     <section class="preview-pane">
-      <div class="preview-toolbar">
-        <strong>预览</strong>
-        <span id="previewStatus">使用 Chromium 渲染</span>
-      </div>
-      <div id="previewHost" class="preview-host">
-        <div id="preview" class="ubbcode preview-content"></div>
-      </div>
+      <div class="preview-toolbar"><strong>&#39044;&#35272;</strong><span id="previewStatus">Chromium</span></div>
+      <div id="previewHost" class="preview-host"><div id="preview" class="ubbcode preview-content"></div></div>
     </section>
-
-    <div class="main-resizer" title="拖动调整预览高度"></div>
-
+    <div class="main-resizer" title="Resize preview"></div>
     <section class="workbench-pane">
       <section class="editor-pane">
-        <header class="toolbar">
-          <div>
-            <h1>NGA Banner Editor</h1>
-            <p id="pathInfo">Electron local preview</p>
-          </div>
+        <header class="toolbar main-toolbar">
           <div class="actions editor-actions">
-            <button id="loadSample" type="button">加载示例</button>
-            <button id="render" type="button">渲染/刷新</button>
-            <button id="loginNga" type="button">登录 NGA</button>
-            <input id="postUrl" type="url" placeholder="帖子链接 read.php?tid=...">
-            <button id="loadPost" type="button">导入帖子</button>
-            <button id="savePost" type="button">发布修改</button>
-            <span id="postStatus" class="post-status">未导入帖子</span>
+            <input id="postUrl" type="url" placeholder="read.php?tid=...">
+            <button id="loadPost" type="button">&#23548;&#20837;&#24086;&#23376;</button>
+            <button id="savePost" type="button">&#21457;&#24067;&#20462;&#25913;</button>
+            <button id="render" type="button">&#21047;&#26032;</button>
+            <span id="postStatus" class="post-status">&#26410;&#23548;&#20837;&#24086;&#23376;</span>
           </div>
         </header>
-        <div class="source-editor">
-          <div id="source" aria-label="NGA BBCode 编辑器"></div>
+        <div class="editor-tabs" role="tablist" aria-label="Editor mode">
+          <button id="codeModeTab" class="editor-tab is-active" role="tab" aria-selected="true" aria-controls="codeModePanel">&#20195;&#30721;&#27169;&#24335;</button>
+          <button id="advancedModeTab" class="editor-tab" role="tab" aria-selected="false" aria-controls="advancedModePanel">&#39640;&#32423;&#27169;&#24335;</button>
         </div>
-        <footer id="status" class="status">准备就绪</footer>
-      </section>
-
-      <div class="workbench-separator" role="separator" aria-orientation="vertical" aria-label="调整编辑器和资源清单宽度" tabindex="0"></div>
-
-      <section class="resource-pane">
-        <section class="resource-panel">
-          <header class="resource-panel-title">资源清单 <span id="resourceCount">0</span> <label>排序 <select id="resourceSort"><option value="default">默认</option><option value="name-asc">名称升序</option><option value="name-desc">名称降序</option></select></label></header>
-          <div id="resourceList" class="resource-list"></div>
+        <section id="codeModePanel" class="editor-mode-panel" role="tabpanel" aria-labelledby="codeModeTab"><div class="source-editor"><div id="source" aria-label="BBCode editor"></div></div></section>
+        <section id="advancedModePanel" class="editor-mode-panel" role="tabpanel" aria-labelledby="advancedModeTab" hidden>
+          <section class="resource-panel"><header class="resource-panel-title"><span>&#36164;&#28304; <strong id="resourceCount">0</strong></span><div class="resource-tools"><input id="resourceSearch" type="search" placeholder="&#25628;&#32034;&#21517;&#31216;&#25110;&#36335;&#24452;" aria-label="&#25628;&#32034;&#36164;&#28304;"><select id="resourceTypeFilter" aria-label="&#36164;&#28304;&#31867;&#22411;"><option value="all">&#20840;&#37096;&#31867;&#22411;</option><option value="image">&#22270;&#29255;</option><option value="url">URL</option><option value="text">&#25991;&#26412;</option><option value="attr">&#23646;&#24615;</option></select><select id="resourceSort" aria-label="&#25490;&#24207;"><option value="default">&#40664;&#35748;&#25490;&#24207;</option><option value="name-asc">&#21517;&#31216;&#21319;&#24207;</option><option value="name-desc">&#21517;&#31216;&#38477;&#24207;</option></select></div></header><div class="advanced-workspace"><nav id="resourceList" class="resource-list" aria-label="&#36164;&#28304;&#26641;"></nav><aside id="resourceInspector" class="resource-inspector"><div class="resource-inspector-empty">&#20174;&#24038;&#20391;&#36873;&#25321;&#36164;&#28304;&#20197;&#32534;&#36753;</div></aside></div></section>
         </section>
+        <footer id="status" class="status">&#20934;&#22791;&#23601;&#32490;</footer>
+      </section>
+      <section id="embeddedImageManager" class="embedded-image-manager">
+        <header class="image-panel-title"><strong>NGA &#22270;&#29255;&#31649;&#29702;</strong></header>
+        <section class="image-post-loader"><input id="imagePostUrl" type="url" placeholder="read.php?tid=..."><button id="imageLoadPost" type="button">&#23548;&#20837;&#24086;&#23376;</button><span id="imageStatus">&#26410;&#23548;&#20837;&#24086;&#23376;</span></section>
+        <section id="imageDropzone" class="image-dropzone"><strong>&#25302;&#25918;&#22270;&#29255;&#21040;&#36825;&#37324;</strong><span>WebP / GIF, no watermark</span><input id="imageFileInput" type="file" accept="image/*" multiple></section>
+        <section id="imageGallery" class="image-gallery"></section>
       </section>
     </section>
   </main>
   <div id="resourceHoverPreview" class="resource-hover-preview" aria-hidden="true"><img alt=""></div>
-
+  <div id="resourceTooltip" class="resource-tooltip" role="tooltip" aria-hidden="true"></div>
+  <div id="resourceContextMenu" class="resource-context-menu" role="menu" hidden><button type="button" role="menuitem" data-tree-action="rename">&#37325;&#21629;&#21517;</button><button type="button" role="menuitem" data-tree-action="locate">&#23450;&#20301;&#21040;&#20195;&#30721;</button></div>
   <script src="../img4.nga.178.com/common_res/js_commonLib.js"></script>
   <script src="../img4.nga.178.com/ngabbs/nga_classic/js_color.js"></script>
   <script src="./nga-shim.js"></script>
@@ -64,5 +57,6 @@
   <script src="../img4.nga.178.com/common_res/js_bbscode_core.js"></script>
   <script src="../img4.nga.178.com/ngabbs/nga_classic/js_bbscode_smiles.js"></script>
   <script src="../dist/renderer.js"></script>
+  <script src="./image-manager.js"></script>
 </body>
 </html>

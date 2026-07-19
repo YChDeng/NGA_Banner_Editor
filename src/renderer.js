@@ -15,22 +15,28 @@ import {deriveResourceBindings} from './banner-model-view.js';
   const preview = document.getElementById('preview');
   const status = document.getElementById('status');
   const previewStatus = document.getElementById('previewStatus');
-  const pathInfo = document.getElementById('pathInfo');
-  const loadSampleButton = document.getElementById('loadSample');
   const renderButton = document.getElementById('render');
   const loginNgaButton = document.getElementById('loginNga');
   const postUrlInput = document.getElementById('postUrl');
   const loadPostButton = document.getElementById('loadPost');
   const savePostButton = document.getElementById('savePost');
   const postStatus = document.getElementById('postStatus');
+  const authStatus = document.getElementById('authStatus');
+  const codeModeTab = document.getElementById('codeModeTab');
+  const advancedModeTab = document.getElementById('advancedModeTab');
+  const codeModePanel = document.getElementById('codeModePanel');
+  const advancedModePanel = document.getElementById('advancedModePanel');
   const resourceList = document.getElementById('resourceList');
   const resourceCount = document.getElementById('resourceCount');
   const resourceSort = document.getElementById('resourceSort');
+  const resourceSearch = document.getElementById('resourceSearch');
+  const resourceTypeFilter = document.getElementById('resourceTypeFilter');
+  const resourceInspector = document.getElementById('resourceInspector');
   const resourceHoverPreview = document.getElementById('resourceHoverPreview');
+  const resourceTooltip = document.getElementById('resourceTooltip');
+  const resourceContextMenu = document.getElementById('resourceContextMenu');
   const appShell = document.querySelector('.app-shell');
   const mainResizer = document.querySelector('.main-resizer');
-  const workbenchPane = document.querySelector('.workbench-pane');
-  const workbenchSeparator = document.querySelector('.workbench-separator');
 
   let currentModel = null;
   let currentResourceBindings = [];
@@ -41,6 +47,8 @@ import {deriveResourceBindings} from './banner-model-view.js';
   let previewTimer = 0;
   let updateVersion = 0;
   let selectedResourceId = '';
+  let resourceQuery = '';
+  let resourceType = 'all';
   let suppressScheduledChange = false;
   let catalogFingerprintsCurrent = null;
   let previewFingerprint = '';
@@ -72,9 +80,8 @@ import {deriveResourceBindings} from './banner-model-view.js';
     if (!currentModel) return;
     const candidates = currentResourceBindings.filter(function (r) { return selection.from === selection.to ? selection.from >= r.range.start && selection.from <= r.range.end : selection.from < r.range.end && selection.to > r.range.start; }).sort(function(a,b){return (a.range.end-a.range.start)-(b.range.end-b.range.start)});
     const id = candidates[0] && candidates[0].stableId;
-    if (!id || id === selectedResourceId) return; selectedResourceId=id;
-    resourceList.querySelectorAll('.is-active').forEach(function(el){el.classList.remove('is-active')});
-    const card=resourceList.querySelector('[data-resource-id="'+cssEscape(id)+'"]'); if(card){card.classList.add('is-active'); let p=card.parentElement.closest('details'); while(p){p.open=true;p=p.parentElement.closest('details')}}
+    if (!id || id === selectedResourceId) return;
+    selectResource(id, { reveal: true });
   }
 
   function setStatus(message, isError) {
@@ -86,20 +93,44 @@ import {deriveResourceBindings} from './banner-model-view.js';
 
   async function init() {
     initMainResize();
-    initWorkbenchResize();
     initResourceHoverPreview();
+    initResourceTooltip();
+    initImageSlotDrop();
+    initResourceContextMenu();
     initResourceEditing();
     initResourceSorting();
+    initEditorTabs();
     editor = createEditorAdapter(sourceHost, { onChange: scheduleLiveUpdates, onSelectionChange: syncResourceFromSelection, onModEnter: render });
     await refreshAuthStatus();
     await window.bbcodePreview.getPaths();
+    window.bbcodePreview.onMediaContent(function (content) { currentPostContext = currentPostContext ? { ...currentPostContext, content } : currentPostContext; setSourceValue(content); renderImmediately(); });
     window.__NGA_REMOTE_ATTACH_BASE = ATTACH_BASE;
     if (window.commonui) {
       window.commonui.getAttachBase = function () { return ATTACH_BASE; };
     }
-    pathInfo.textContent = '未自动加载示例 | images: ' + ATTACH_BASE;
     updateResourceList('');
     setStatus('准备就绪');
+  }
+
+  function initEditorTabs() {
+    const tabs = [codeModeTab, advancedModeTab];
+    function activate(tab) {
+      const codeActive = tab === codeModeTab;
+      codeModeTab.classList.toggle('is-active', codeActive);
+      advancedModeTab.classList.toggle('is-active', !codeActive);
+      codeModeTab.setAttribute('aria-selected', String(codeActive));
+      advancedModeTab.setAttribute('aria-selected', String(!codeActive));
+      codeModePanel.hidden = !codeActive;
+      advancedModePanel.hidden = codeActive;
+      if (codeActive) requestAnimationFrame(function () { editor?.layout(); editor?.focus(); });
+    }
+    tabs.forEach(function (tab, index) {
+      tab.addEventListener('click', function () { activate(tab); });
+      tab.addEventListener('keydown', function (event) {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault(); const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]; next.focus(); activate(next);
+      });
+    });
   }
 
   async function refreshAuthStatus() {
@@ -209,8 +240,13 @@ import {deriveResourceBindings} from './banner-model-view.js';
     window.addEventListener('mousemove', function (event) {
       if (!dragging) return;
       const rect = appShell.getBoundingClientRect();
-      const top = Math.min(Math.max(event.clientY - rect.top, 220), rect.height - 220);
-      appShell.style.gridTemplateRows = top + 'px 8px minmax(220px, 1fr)';
+      const globalBar = appShell.querySelector('.global-bar');
+      const globalHeight = globalBar ? globalBar.getBoundingClientRect().height : 40;
+      const separatorHeight = mainResizer.getBoundingClientRect().height || 5;
+      const available = Math.max(440, rect.height - globalHeight - separatorHeight);
+      const previewHeight = Math.min(Math.max(event.clientY - rect.top - globalHeight, 220), available - 220);
+      const workbenchHeight = Math.max(220, available - previewHeight);
+      appShell.style.gridTemplateRows = globalHeight + 'px ' + previewHeight + 'px ' + separatorHeight + 'px ' + workbenchHeight + 'px';
     });
 
     window.addEventListener('mouseup', function () {
@@ -220,62 +256,6 @@ import {deriveResourceBindings} from './banner-model-view.js';
     });
   }
 
-  function initWorkbenchResize() {
-    if (!workbenchPane || !workbenchSeparator) return;
-    const gutterWidth = 8;
-    const editorMinWidth = 320;
-    const resourceMinWidth = 360;
-    const desktopMedia = window.matchMedia('(min-width: 1001px)');
-    let pointerId = null;
-    let editorRatio = 0.58;
-
-    function clampEditorWidth(width, availableWidth) {
-      const maxWidth = Math.max(editorMinWidth, availableWidth - resourceMinWidth);
-      return Math.min(Math.max(width, editorMinWidth), maxWidth);
-    }
-
-    function applyRatio() {
-      if (!desktopMedia.matches) {
-        cleanupDrag();
-        workbenchPane.style.removeProperty('grid-template-columns');
-        return;
-      }
-      const availableWidth = Math.max(0, workbenchPane.getBoundingClientRect().width - gutterWidth);
-      const editorWidth = clampEditorWidth(availableWidth * editorRatio, availableWidth);
-      workbenchPane.style.gridTemplateColumns = editorWidth + 'px ' + gutterWidth + 'px minmax(' + resourceMinWidth + 'px, 1fr)';
-    }
-
-    function cleanupDrag(event) {
-      if (event?.pointerId != null && pointerId !== null && event.pointerId !== pointerId) return;
-      pointerId = null;
-      document.body.classList.remove('resizing-workbench');
-    }
-
-    workbenchSeparator.addEventListener('pointerdown', function (event) {
-      if (!desktopMedia.matches || (event.button !== undefined && event.button !== 0)) return;
-      pointerId = event.pointerId;
-      workbenchSeparator.setPointerCapture(pointerId);
-      document.body.classList.add('resizing-workbench');
-      event.preventDefault();
-    });
-
-    workbenchSeparator.addEventListener('pointermove', function (event) {
-      if (event.pointerId !== pointerId || !desktopMedia.matches) return;
-      const rect = workbenchPane.getBoundingClientRect();
-      const availableWidth = Math.max(0, rect.width - gutterWidth);
-      const editorWidth = clampEditorWidth(event.clientX - rect.left, availableWidth);
-      editorRatio = availableWidth ? editorWidth / availableWidth : editorRatio;
-      workbenchPane.style.gridTemplateColumns = editorWidth + 'px ' + gutterWidth + 'px minmax(' + resourceMinWidth + 'px, 1fr)';
-    });
-
-    workbenchSeparator.addEventListener('pointerup', cleanupDrag);
-    workbenchSeparator.addEventListener('pointercancel', cleanupDrag);
-    workbenchSeparator.addEventListener('lostpointercapture', cleanupDrag);
-    window.addEventListener('blur', cleanupDrag);
-    window.addEventListener('resize', applyRatio);
-    desktopMedia.addEventListener('change', applyRatio);
-    applyRatio();
-  }
 
   function initResourceHoverPreview() {
     if (!resourceList || !resourceHoverPreview) return;
@@ -349,9 +329,9 @@ import {deriveResourceBindings} from './banner-model-view.js';
   }
 
   function initResourceEditing() {
-    resourceList.addEventListener('click', function (event) {
+    advancedModePanel.addEventListener('click', function (event) {
       const action = event.target.closest('[data-resource-action]');
-      if (action && resourceList.contains(action)) {
+      if (action && advancedModePanel.contains(action)) {
         event.stopPropagation();
         const start = Number(action.dataset.start);
         const end = Number(action.dataset.end);
@@ -363,15 +343,15 @@ import {deriveResourceBindings} from './banner-model-view.js';
       if (event.target.closest('[data-edit-kind]')) event.stopPropagation();
     });
 
-    resourceList.addEventListener('keydown', function (event) {
+    advancedModePanel.addEventListener('keydown', function (event) {
       if (event.target.closest('[data-edit-kind]') && event.key === 'Enter' && event.target.tagName !== 'TEXTAREA') {
         event.target.blur();
       }
     });
 
-    resourceList.addEventListener('change', function (event) {
+    advancedModePanel.addEventListener('change', function (event) {
       const control = event.target.closest('[data-edit-kind]');
-      if (!control || !resourceList.contains(control)) return;
+      if (!control || !advancedModePanel.contains(control)) return;
       applyResourceEdit(control);
     });
   }
@@ -402,23 +382,17 @@ import {deriveResourceBindings} from './banner-model-view.js';
   }
 
   function captureResourceViewState(control) {
-    const anchor = control ? control.closest('[data-resource-key]') : null;
-    const listRect = resourceList.getBoundingClientRect();
-    const anchorRect = anchor ? anchor.getBoundingClientRect() : null;
-    return {
-      scrollTop: resourceList.scrollTop,
-      focusKey: control ? control.dataset.focusKey || '' : '',
-      anchorKey: anchor ? anchor.dataset.resourceKey || '' : '',
-      anchorOffset: anchorRect ? anchorRect.top - listRect.top : null,
-      selectionStart: control && typeof control.selectionStart === 'number' ? control.selectionStart : null,
-      selectionEnd: control && typeof control.selectionEnd === 'number' ? control.selectionEnd : null
-    };
+    const controlAnchor=control?control.closest('[data-resource-key]'):null;
+    const treeAnchor=controlAnchor&&resourceList.contains(controlAnchor)?controlAnchor:resourceList.querySelector('[data-resource-id="'+cssEscape(selectedResourceId)+'"]');
+    const listRect=resourceList.getBoundingClientRect(), anchorRect=treeAnchor?treeAnchor.getBoundingClientRect():null;
+    return {scrollTop:resourceList.scrollTop,inspectorScrollTop:resourceInspector.scrollTop,focusKey:control?control.dataset.focusKey||'':'',anchorKey:treeAnchor?treeAnchor.dataset.resourceKey||'':'',anchorOffset:anchorRect?anchorRect.top-listRect.top:null,selectionStart:control&&typeof control.selectionStart==='number'?control.selectionStart:null,selectionEnd:control&&typeof control.selectionEnd==='number'?control.selectionEnd:null};
   }
 
   function restoreResourceViewState(state) {
     if (!state) return;
     function restore() {
       resourceList.scrollTop = state.scrollTop || 0;
+      resourceInspector.scrollTop = state.inspectorScrollTop || 0;
       if (state.anchorKey && state.anchorOffset !== null) {
         const anchor = resourceList.querySelector('[data-resource-key="' + cssEscape(state.anchorKey) + '"]');
         if (anchor) {
@@ -435,7 +409,7 @@ import {deriveResourceBindings} from './banner-model-view.js';
 
   function restoreFocusControl(state) {
     const selector = '[data-focus-key="' + cssEscape(state.focusKey) + '"]';
-    const control = resourceList.querySelector(selector);
+    const control = advancedModePanel.querySelector(selector);
     if (!control) return;
     control.focus({ preventScroll: true });
     if (state.selectionStart !== null && typeof control.setSelectionRange === 'function') {
@@ -482,6 +456,8 @@ import {deriveResourceBindings} from './banner-model-view.js';
       rebuildResourceTree();
       restoreResourceViewState(viewState);
     });
+    resourceSearch.addEventListener('input', function () { resourceQuery = resourceSearch.value.trim().toLocaleLowerCase('zh-Hans-CN'); rebuildResourceTree(); });
+    resourceTypeFilter.addEventListener('change', function () { resourceType = resourceTypeFilter.value || 'all'; rebuildResourceTree(); });
     resourceList.addEventListener('toggle', function (event) {
       const details = event.target.closest && event.target.closest('.catalog-dir[data-directory-key]');
       if (details) directoryOpenState.set(details.dataset.directoryKey, details.open);
@@ -495,7 +471,10 @@ import {deriveResourceBindings} from './banner-model-view.js';
   function rebuildResourceTree() {
     if (!currentModel) return;
     const tree=measurePerf('model.tree',()=>buildResourceTree(currentModel,currentResourceBindings),{resources:currentResourceBindings.length});
-    const html=renderModelSummary(currentModel,currentResourceBindings)+renderTreeNode(tree,0); measurePerf('model.innerHTML',()=>{resourceList.innerHTML=html},{resources:currentResourceBindings.length}); if(selectedResourceId){resourceList.querySelector('[data-resource-id="'+cssEscape(selectedResourceId)+'"]')?.classList.add('is-active')}
+    const html=renderModelSummary(currentModel,currentResourceBindings)+renderTreeNode(tree,0); measurePerf('model.innerHTML',()=>{resourceList.innerHTML=html},{resources:currentResourceBindings.length});
+    const visible=currentResourceBindings.filter(resourceMatches);
+    if(!visible.some(item=>item.stableId===selectedResourceId)) selectedResourceId=visible[0]?.stableId||'';
+    selectResource(selectedResourceId,{reveal:false});
   }
 
   function updateResourceList(bbcode) {
@@ -522,21 +501,23 @@ import {deriveResourceBindings} from './banner-model-view.js';
       if(!resourceByModelId.has(resource.modelId)) resourceByModelId.set(resource.modelId, []);
       resourceByModelId.get(resource.modelId).push(resource);
     });
-    function projectLeaf(item, parentKey, sourceOrder) {
+    function projectLeaf(item, parentKey, sourceOrder, ancestors) {
       const kindKey = item.kind === 'StyleBlock' ? 'style' : 'slot:' + item.type;
       const key = (parentKey ? parentKey + '/' : '') + kindKey + ':' + item.logicalId;
       const tokenIds = new Set();
       if (item.source.nameTokenId) tokenIds.add(item.source.nameTokenId);
       if (item.source.pairedNameTokenId) tokenIds.add(item.source.pairedNameTokenId);
-      return {key, name:item.name, children:[], resources:(resourceByModelId.get(item.logicalId)||[]).slice(), tokenIds, errors:[], sourceOrder, isSystemUncategorized:false};
+      const projectedResources=(resourceByModelId.get(item.logicalId)||[]).map(resource=>({...resource,ancestorNames:ancestors.slice(),slotName:item.name}));
+      return {key, name:item.name, children:[], resources:projectedResources, tokenIds, errors:[], sourceOrder, isSystemUncategorized:false, ancestors:ancestors.slice(), isLeaf:true};
     }
-    function projectBlock(block, parentKey, sourceOrder) {
+    function projectBlock(block, parentKey, sourceOrder, ancestors=[]) {
       const key = block.virtual ? SYSTEM_UNCATEGORIZED_KEY : (parentKey ? parentKey + '/' : '') + 'block:' + block.logicalId;
       const node = {key, name:block.name, children:[], resources:[], tokenIds:new Set(), errors:[], sourceOrder, isSystemUncategorized:block.virtual};
       block.sourceOccurrences.forEach(function(source){if(source.tokenId)node.tokenIds.add(source.tokenId);if(source.pairedTokenId)node.tokenIds.add(source.pairedTokenId)});
-      block.blocks.forEach(function(child,index){node.children.push(projectBlock(child,key,index))});
-      block.slots.forEach(function(slot,index){node.children.push(projectLeaf(slot,key,block.blocks.length+index))});
-      block.styleBlocks.forEach(function(style,index){node.children.push(projectLeaf(style,key,block.blocks.length+block.slots.length+index))});
+      const childAncestors=block.virtual?ancestors:ancestors.concat(block.name);
+      block.blocks.forEach(function(child,index){node.children.push(projectBlock(child,key,index,childAncestors))});
+      block.slots.forEach(function(slot,index){node.children.push(projectLeaf(slot,key,block.blocks.length+index,childAncestors))});
+      block.styleBlocks.forEach(function(style,index){node.children.push(projectLeaf(style,key,block.blocks.length+block.slots.length+index,childAncestors))});
       return node;
     }
     modelRoot.blocks.forEach(function(block,index){root.children.push(projectBlock(block,'',index))});
@@ -554,20 +535,31 @@ import {deriveResourceBindings} from './banner-model-view.js';
     return '<div class="catalog-summary">共 ' + resources.length + ' 个资源，' + model.diagnostics.length + ' 个提示</div>' + errorHtml;
   }
 
+  function resourceMatches(item) {
+    if (resourceType !== 'all' && item.type !== resourceType) return false;
+    if (!resourceQuery) return true;
+    return [item.name,item.path,item.sourceKind,item.type].some(value=>String(value||'').toLocaleLowerCase('zh-Hans-CN').includes(resourceQuery));
+  }
+  function nodeHasMatches(node) { return node.resources.some(resourceMatches) || node.children.some(nodeHasMatches); }
+
   function renderTreeNode(node, depth) {
-    const children = node.children.slice().sort(compareDirectories);
+    const children = node.children.slice().sort(compareDirectories).filter(nodeHasMatches);
     const childHtml = children.map(function (child) {
       const tokenIds = Array.from(child.tokenIds);
       const systemLabel = child.isSystemUncategorized ? '<span class="dir-system-mark">（系统）</span>' : '';
-      const rename = tokenIds.length
-        ? '<input class="dir-name-input" data-edit-kind="comment-name-bulk" data-focus-key="dir:' + escapeHtml(tokenIds.join(',')) + '" data-token-ids="' + escapeHtml(tokenIds.join(',')) + '" value="' + escapeHtml(child.name) + '" title="修改关联 comment 名称">'
-        : '<span class="dir-name-static">' + escapeHtml(child.name) + systemLabel + '</span>';
       const isOpen = directoryOpenState.has(child.key) ? directoryOpenState.get(child.key) : !child.isSystemUncategorized;
-      return '<details class="catalog-dir' + (child.isSystemUncategorized ? ' catalog-dir-system' : '') + '" data-directory-key="' + escapeHtml(child.key) + '"' + (isOpen ? ' open' : '') + ' style="--depth:' + depth + '"><summary>' + rename + '<span class="dir-count">' + child.resourceCount + '</span></summary>' + renderTreeNode(child, depth + 1) + '</details>';
+      if(child.isLeaf) return renderLeafNode(child,depth);
+      return '<details class="catalog-dir' + (child.isSystemUncategorized ? ' catalog-dir-system' : '') + '" data-node-kind="block" data-node-name="' + escapeHtml(child.name) + '" data-token-ids="' + escapeHtml(tokenIds.join(',')) + '" data-directory-key="' + escapeHtml(child.key) + '"' + (isOpen ? ' open' : '') + ' style="--depth:' + depth + '"><summary tabindex="0" role="treeitem"><span class="dir-name-static">' + escapeHtml(child.name) + systemLabel + '</span><span class="dir-count">' + child.resourceCount + '</span></summary>' + renderTreeNode(child, depth + 1) + '</details>'; 
     }).join('');
-    const resources = node.resources.slice();
+    const resources = node.resources.filter(resourceMatches);
     if (resourceSortMode !== 'default') resources.sort(compareResources);
     return '<div class="catalog-node">' + childHtml + resources.map(renderResourceItem).join('') + '</div>';
+  }
+
+  function renderLeafNode(node, depth) {
+    const resources=node.resources.slice(); if(resourceSortMode!=='default')resources.sort(compareResources);
+    if(!resources.length)return '';
+    return '<div class="catalog-leaf" data-depth="'+depth+'">'+resources.map((item,index)=>renderResourceItem(item,{node,index,count:resources.length})).join('')+'</div>';
   }
 
   function compareDirectories(a, b) {
@@ -582,18 +574,107 @@ import {deriveResourceBindings} from './banner-model-view.js';
     return (resourceSortMode === 'name-desc' ? -compared : compared) || Number(a.id.slice(1)) - Number(b.id.slice(1));
   }
 
-  function renderResourceItem(item) {
-    const typeLabel = item.type === 'image' ? '图片' : item.type === 'url' ? 'URL' : item.type === 'text' ? '文本' : '属性';
-    const warnings = item.errors && item.errors.length ? '<div class="resource-item-errors">' + item.errors.map(escapeHtml).join('<br>') + '</div>' : '';
-    return '<article class="catalog-resource resource-kind-' + escapeHtml(item.type) + '" data-resource-key="' + escapeHtml(resourceAnchorKey(item)) + '" data-resource-id="' + escapeHtml(item.stableId) + '">' +
-      '<header><span class="resource-type resource-type-' + escapeHtml(item.type) + '">' + typeLabel + '</span>' +
-      '<span class="resource-source">' + escapeHtml(item.sourceKind) + '</span>' +
-      '<button type="button" class="resource-line resource-locate" data-locate-id="' + escapeHtml(item.stableId) + '">L' + escapeHtml(item.line || '') + '</button></header>' +
-      '<div class="resource-path" title="' + escapeHtml(item.path) + '">' + escapeHtml(item.path) + '</div>' +
-      renderResourceEditor(item) + warnings +
-      '</article>';
+  function resourceTypeLabel(type) { return type === 'image' ? '\u56fe\u7247' : type === 'url' ? 'URL' : type === 'text' ? '\u6587\u672c' : '\u5c5e\u6027'; }
+
+  function renderResourceItem(item, leaf={}) {
+    const typeLabel=resourceTypeLabel(item.type), name=leaf.node?.name||item.name||item.path.split('\\').pop()||'(\u672a\u547d\u540d)', tooltipData=buildResourceTooltipData(item), tokenIds=Array.from(leaf.node?.tokenIds||[]);
+    const icon=item.type==='image'?'codicon-file-media':item.type==='text'?'codicon-symbol-string':item.type==='url'?'codicon-link':'codicon-settings-gear';
+    const dropAttrs=item.type==='image'?' data-drop-target="image-slot" data-drop-stable-id="'+escapeHtml(item.stableId)+'"':'';
+    return '<button type="button" role="treeitem" class="resource-row'+(item.stableId===selectedResourceId?' is-active':'')+'"'+dropAttrs+' data-node-kind="slot" data-node-name="'+escapeHtml(name)+'" data-token-ids="'+escapeHtml(tokenIds.join(','))+'" data-resource-key="'+escapeHtml(resourceAnchorKey(item))+'" data-resource-id="'+escapeHtml(item.stableId)+'" data-tooltip-kind="'+escapeHtml(tooltipData.kind)+'" data-tooltip-path="'+escapeHtml(tooltipData.path)+'" data-tooltip-value="'+escapeHtml(tooltipData.value)+'" data-tooltip-preview="'+escapeHtml(tooltipData.preview||'')+'"><span class="codicon '+icon+'" aria-label="'+typeLabel+'"></span><span class="resource-row-main"><strong>'+escapeHtml(name)+'</strong></span><span class="resource-line">L'+escapeHtml(item.line||'')+'</span></button>';
   }
 
+  function renderResourceInspector(item) {
+    if (!item) return '<div class="resource-inspector-empty">\u6ca1\u6709\u7b26\u5408\u7b5b\u9009\u6761\u4ef6\u7684\u8d44\u6e90</div>';
+    const typeLabel = resourceTypeLabel(item.type);
+    const warnings = item.errors?.length ? '<div class="resource-item-errors">' + item.errors.map(escapeHtml).join('<br>') + '</div>' : '';
+    const ancestors=(item.ancestorNames||[]).filter(Boolean), slotName=item.slotName||item.name||typeLabel, blockName=ancestors.at(-1)||'', title=blockName?blockName+' - '+slotName:slotName;
+    const breadcrumb=ancestors.concat(slotName);
+    const dropAttrs=item.type==='image'?' data-drop-target="image-slot" data-drop-stable-id="'+escapeHtml(item.stableId)+'"':'';
+    return '<article class="resource-detail catalog-resource"'+dropAttrs+' data-resource-key="' + escapeHtml(resourceAnchorKey(item)) + '" data-resource-id="' + escapeHtml(item.stableId) + '"><div class="resource-breadcrumb">' + breadcrumb.map(part=>'<span>'+escapeHtml(part)+'</span>').join('<i>/</i>') + '</div><header class="resource-detail-header"><div><span class="resource-type resource-type-' + escapeHtml(item.type) + '">' + typeLabel + '</span><strong title="'+escapeHtml(title)+'">' + escapeHtml(title) + '</strong></div><button type="button" class="resource-locate" data-locate-id="' + escapeHtml(item.stableId) + '">\u5b9a\u4f4d\u4ee3\u7801 ? L' + escapeHtml(item.line || '') + '</button></header><div class="resource-detail-body">' + renderResourceEditor(item) + warnings + '</div></article>';
+  }
+
+  function buildResourceTooltipData(item) {
+    const value=item.type==='image'?(item.url||''):item.type==='url'?(item.value||''):item.type==='text'?(item.value||''):(item.value||item.path||'');
+    return {kind:item.type,path:item.path||'',value:String(value),preview:item.type==='image'?toFullImageUrl(item.url||''):''};
+  }
+
+  function readImageDropPayload(event) {
+    const transfer=event.dataTransfer; if(!transfer)return null;
+    try { const raw=transfer.getData('application/x-nga-image'); if(raw){const payload=JSON.parse(raw);if(payload?.url)return payload;} } catch {}
+    const fallback=transfer.getData('text/plain')||transfer.getData('text/uri-list');
+    return fallback ? {url:fallback.split('\n')[0].trim()} : null;
+  }
+  function resolveDropResource(target) {
+    const id=target?.dataset.dropStableId; const item=currentResourceBindings.find(resource=>resource.stableId===id); return item?.type==='image'&&item.urlRange?item:null;
+  }
+  function initImageSlotDrop() {
+    let active=null;
+    function clear(){advancedModePanel.querySelectorAll('.is-drop-target').forEach(node=>node.classList.remove('is-drop-target'));active=null;}
+    function isImageDrag(event){
+      if(window.__ngaImageDragActive) return true;
+      const types=Array.from(event.dataTransfer?.types||[]);
+      return types.includes('application/x-nga-image');
+    }
+    function targetFromEvent(event){
+      const node=event.target?.closest?.('[data-drop-target="image-slot"]');
+      return node && advancedModePanel.contains(node) ? node : null;
+    }
+    advancedModePanel.addEventListener('dragenter',event=>{
+      const target=targetFromEvent(event);
+      if(!target||!isImageDrag(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect='copy';
+      if(active!==target){clear();target.classList.add('is-drop-target');active=target;}
+    });
+    advancedModePanel.addEventListener('dragover',event=>{
+      const target=targetFromEvent(event);
+      if(!target||!isImageDrag(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect='copy';
+      if(active!==target){clear();target.classList.add('is-drop-target');active=target;}
+    });
+    advancedModePanel.addEventListener('dragleave',event=>{
+      if(active&&(!event.relatedTarget||!active.contains(event.relatedTarget))) clear();
+    });
+    advancedModePanel.addEventListener('drop',event=>{
+      const target=targetFromEvent(event);
+      if(!target||!isImageDrag(event)) return;
+      const payload=readImageDropPayload(event),item=resolveDropResource(target);
+      if(!payload||!item){clear();return;}
+      event.preventDefault();
+      const url=payload.url.trim();
+      if(url===String(item.url||'')){setStatus('\u56fe\u7247\u94fe\u63a5\u672a\u53d8\u5316');clear();return;}
+      const viewState=captureResourceViewState(target);
+      applyReplacements([{start:item.urlRange.start,end:item.urlRange.end,value:url,expected:item.url||''}],viewState);
+      clear();
+    });
+    addEventListener('dragend',clear); addEventListener('drop',()=>setTimeout(clear,0)); addEventListener('blur',clear);
+  }
+
+  function initResourceTooltip() {
+    let timer=0, active=null;
+    function hide(){clearTimeout(timer);active=null;resourceTooltip.classList.remove('is-visible');resourceTooltip.setAttribute('aria-hidden','true');resourceTooltip.replaceChildren();}
+    function show(target){clearTimeout(timer);active=target;timer=setTimeout(()=>{if(active!==target)return;const data=target.dataset;const wrap=document.createElement('div');wrap.className='tooltip-content';const path=document.createElement('div');path.className='tooltip-path';path.textContent=data.tooltipPath||'';wrap.appendChild(path);if(data.tooltipKind==='image'&&data.tooltipPreview){const image=document.createElement('img');image.src=data.tooltipPreview;image.alt='';wrap.appendChild(image);}const value=document.createElement('div');value.className='tooltip-value';value.textContent=data.tooltipValue||'(?)';wrap.appendChild(value);resourceTooltip.replaceChildren(wrap);resourceTooltip.classList.add('is-visible');resourceTooltip.setAttribute('aria-hidden','false');position(target);},350);}
+    function position(target){const rect=target.getBoundingClientRect(),tip=resourceTooltip.getBoundingClientRect(),gap=8;let left=rect.right+gap,top=rect.top;if(left+tip.width>innerWidth-8)left=rect.left-tip.width-gap;if(top+tip.height>innerHeight-8)top=innerHeight-tip.height-8;resourceTooltip.style.left=Math.max(8,left)+'px';resourceTooltip.style.top=Math.max(8,top)+'px';}
+    resourceList.addEventListener('pointerover',e=>{const row=e.target.closest('.resource-row[data-tooltip-kind]');if(row)show(row);}); resourceList.addEventListener('pointerout',e=>{if(!e.relatedTarget||!e.relatedTarget.closest?.('.resource-row[data-tooltip-kind]'))hide();}); resourceList.addEventListener('focusin',e=>{const row=e.target.closest('.resource-row[data-tooltip-kind]');if(row)show(row);}); resourceList.addEventListener('focusout',hide); addEventListener('resize',()=>{if(active&&resourceTooltip.classList.contains('is-visible'))position(active);});
+  }
+
+  function initResourceContextMenu() {
+    let target=null, committing=false;
+    const renameButton=resourceContextMenu.querySelector('[data-tree-action="rename"]');
+    function close(){resourceContextMenu.hidden=true;target=null;}
+    function open(node,x,y){target=node;renameButton.disabled=!(node.dataset.tokenIds||'').trim();resourceContextMenu.hidden=false;const rect=resourceContextMenu.getBoundingClientRect();resourceContextMenu.style.left=Math.max(6,Math.min(x,innerWidth-rect.width-6))+'px';resourceContextMenu.style.top=Math.max(6,Math.min(y,innerHeight-rect.height-6))+'px';resourceContextMenu.querySelector('button:not(:disabled)')?.focus();}
+    function beginRename(){if(!target)return;const label=target.matches('.resource-row')?target.querySelector('.resource-row-main strong'):target.querySelector(':scope > summary .dir-name-static');if(!label)return;const original=target.dataset.nodeName||label.textContent;const input=document.createElement('input');input.className='tree-inline-rename';input.value=original;label.replaceWith(input);close();requestAnimationFrame(()=>{input.focus();input.select()});let done=false;function finish(commit){if(done)return;done=true;if(commit&&input.value!==original){const ids=(target?.dataset.tokenIds||input.closest('[data-token-ids]')?.dataset.tokenIds||'').split(',').filter(Boolean);const replacements=ids.map(id=>{const token=currentModel?.tokensById[id];return token?{start:token.nameRange.start,end:token.nameRange.end,value:input.value,expected:token.name}:null}).filter(Boolean);if(replacements.length)applyReplacements(replacements,captureResourceViewState(input));else input.replaceWith(label);}else input.replaceWith(label);}input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();finish(true)}else if(e.key==='Escape'){e.preventDefault();finish(false)}});input.addEventListener('blur',()=>finish(true));}
+    resourceList.addEventListener('contextmenu',e=>{const node=e.target.closest('[data-node-kind]');if(!node)return;e.preventDefault();open(node,e.clientX,e.clientY)});resourceList.addEventListener('keydown',e=>{if(e.key==='ContextMenu'||(e.shiftKey&&e.key==='F10')){const node=e.target.closest('[data-node-kind]');if(node){e.preventDefault();const r=node.getBoundingClientRect();open(node,r.left+20,r.top+20)}}});resourceContextMenu.addEventListener('click',e=>{const action=e.target.closest('[data-tree-action]')?.dataset.treeAction;if(action==='rename')beginRename();else if(action==='locate'&&target){const id=target.dataset.resourceId,item=currentResourceBindings.find(r=>r.stableId===id);if(item)editor.setSelection(item.range.start,item.range.end,true);close();}});document.addEventListener('pointerdown',e=>{if(!resourceContextMenu.hidden&&!resourceContextMenu.contains(e.target))close()});document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!resourceContextMenu.hidden)close()});addEventListener('blur',close);
+  }
+
+  function selectResource(id, options={}) {
+    selectedResourceId=id||'';
+    resourceList.querySelectorAll('[data-resource-id]').forEach(row=>row.classList.toggle('is-active',row.dataset.resourceId===selectedResourceId));
+    const item=currentResourceBindings.find(resource=>resource.stableId===selectedResourceId);
+    resourceInspector.innerHTML=renderResourceInspector(item);
+    if(options.reveal){const row=resourceList.querySelector('[data-resource-id="'+cssEscape(selectedResourceId)+'"]');if(row){let dir=row.closest('details');while(dir){dir.open=true;dir=dir.parentElement.closest('details')}row.scrollIntoView({block:'nearest'});}}
+  }
 
   function renderResourceEditor(item) {
     if (item.type === 'image') return renderImageEditor(item);
@@ -673,6 +754,7 @@ import {deriveResourceBindings} from './banner-model-view.js';
     if (!value) return '';
     if (/^https?:\/\//i.test(value)) return value;
     if (value.startsWith('./')) return ATTACH_BASE + '/' + value.slice(2);
+    if (/^\/mon_\d+\//i.test(value)) return ATTACH_BASE + value;
     if (value.startsWith('/attachments/')) return 'https://img.nga.178.com' + value;
     return value;
   }
@@ -686,13 +768,22 @@ import {deriveResourceBindings} from './banner-model-view.js';
       .replace(/'/g, '&#39;');
   }
 
-  loadSampleButton.addEventListener('click', loadSample);
   renderButton.addEventListener('click', function () { renderImmediately(); });
   loginNgaButton.addEventListener('click', openLogin);
   loadPostButton.addEventListener('click', loadPostFromUrl);
   savePostButton.addEventListener('click', saveCurrentPost);
   resourceSort.value = resourceSortMode;
-  resourceList.addEventListener('click', function(event){ if(!currentModel)return; const errorButton=event.target.closest('[data-locate-error]'); if(errorButton){const issue=currentModel.diagnostics.find(function(e){return e.id===errorButton.dataset.locateError});if(issue&&Number.isInteger(issue.from)&&Number.isInteger(issue.to))editor.setSelection(issue.from,issue.to,true);return;} const locate=event.target.closest('[data-locate-id]'); if(!locate)return; const item=currentResourceBindings.find(function(r){return r.stableId===locate.dataset.locateId}); if(item){selectedResourceId=item.stableId;editor.setSelection(item.range.start,item.range.end,true);} });
+  resourceList.addEventListener('click', function(event){
+    if(!currentModel)return;
+    const errorButton=event.target.closest('[data-locate-error]'); if(errorButton){const issue=currentModel.diagnostics.find(e=>e.id===errorButton.dataset.locateError);if(issue&&Number.isInteger(issue.from)&&Number.isInteger(issue.to))editor.setSelection(issue.from,issue.to,true);return;}
+    const row=event.target.closest('.resource-row[data-resource-id]'); if(row){selectResource(row.dataset.resourceId);return;}
+  });
+  resourceInspector.addEventListener('click', function(event){
+    const locate=event.target.closest('[data-locate-id]');
+    if(!locate)return;
+    const item=currentResourceBindings.find(r=>r.stableId===locate.dataset.locateId);
+    if(item)editor.setSelection(item.range.start,item.range.end,true);
+  });
 
   init().catch(function (error) {
     setStatus('初始化失败：' + error.message, true);

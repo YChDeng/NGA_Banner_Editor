@@ -1,0 +1,23 @@
+﻿.embedded-image-manager { --im-muted:var(--color-muted); --im-border:var(--color-border); --im-panel:var(--color-control-bg); --im-error:var(--color-error); color:var(--color-text); font:12px system-ui,-apple-system,"Segoe UI",sans-serif; }
+.embedded-image-manager * { box-sizing:border-box; }
+.embedded-image-manager input,.embedded-image-manager button { min-height:30px; border:1px solid var(--im-border); border-radius:6px; background:var(--color-input-bg); color:var(--color-text); }
+.embedded-image-manager input { padding:4px 8px; }
+.embedded-image-manager button { padding:4px 10px; cursor:pointer; }
+.embedded-image-manager button:disabled,.embedded-image-manager input:disabled { cursor:not-allowed; opacity:.45; }
+#imageStatus { color:var(--im-muted); }
+#imageStatus.error { color:var(--im-error); }
+.image-dropzone.dragover { border-color:var(--color-focus); background:color-mix(in srgb,var(--color-focus) 8%,var(--color-pane-bg)); }
+.image-gallery { min-height:0; overflow:auto; display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); align-content:start; gap:8px; padding:6px; }
+.image-gallery .empty { color:var(--im-muted); padding:12px; }
+.image-gallery .card { display:grid; gap:6px; padding:7px; border:1px solid var(--im-border); background:var(--im-panel); }
+.image-gallery .preview { position:relative; }
+.image-gallery .preview img { display:block; width:100%; height:112px; object-fit:contain; border-radius:5px; background:#111827; }
+.image-gallery .delete-image { position:absolute; top:5px; right:5px; width:27px; min-height:27px; padding:0; border-radius:50%; border-color:#ef4444; background:#ffffffdd; color:#dc2626; font-size:20px; line-height:1; }
+.image-gallery .delete-image:hover { background:#dc2626; color:white; }
+.image-gallery .url { overflow:hidden; color:var(--im-muted); font:11px "Cascadia Mono",Consolas,monospace; text-overflow:ellipsis; white-space:nowrap; }
+.image-gallery .card input { width:100%; }
+.image-gallery.locked .card { opacity:.7; }
+@media (prefers-color-scheme:dark) { .image-gallery .delete-image { background:#111827dd; color:#f87171; } }
+
+.image-gallery .card[draggable="true"] { cursor:grab; }
+.image-gallery .card[draggable="true"]:active,.image-gallery .card.dragging { cursor:grabbing; opacity:.65; }

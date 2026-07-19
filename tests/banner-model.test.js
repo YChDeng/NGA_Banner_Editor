@@ -11,21 +11,21 @@ const blockAt=(m,logicalPath)=>m.blocks.find(block=>JSON.stringify(block.logical
 const slotSummary=block=>block.slots.map(slot=>slot.type+':'+slot.name).sort();
 
 test('完整 legacy 路径末级为 Slot，之前所有段为 Block',()=>{
- const m=parse('[comment // ++甲][comment // 乙++][comment // 图][img]x[/img][comment // 乙--][comment // --甲]');
+ const m=parse('[comment // $++甲][comment // $乙++][comment // $图][img]x[/img][comment // $乙--][comment // $--甲]');
  assert.deepEqual(m.blocks.map(x=>x.logicalPath),[['甲'],['甲','图']]);
  assert.deepEqual(m.slots[0].logicalPath,['甲','图','乙']);
  assert.equal(m.slots[0].name,'乙');
 });
 
 test('同父同名 Block 合并多个 sourceOccurrences',()=>{
- const text='[comment // ++组][comment // A++][comment // 图][img]a[/img][comment // A--][comment // --组]\n[comment // ++组][comment // A++][comment // 链接][url=b][comment // A--][comment // --组]';
+ const text='[comment // $++组][comment // $A++][comment // $图][img]a[/img][comment // $A--][comment // $--组]\n[comment // $++组][comment // $A++][comment // $链接][url=b][comment // $A--][comment // $--组]';
  const m=parse(text); const block=blockAt(m,['组','图']);
  const secondBlock=blockAt(m,['组','链接']);
  assert.equal(m.blocks.filter(x=>x.logicalPath.join('/')==='组/图').length,1);
  assert.equal(block.sourceOccurrences.length,1);
  assert.deepEqual(slotSummary(block),['image:A']);
  assert.deepEqual(slotSummary(secondBlock),['url:A']);
- const merged=parse('[comment // ++组][comment // A++][comment // 图][img]a[/img][comment // A--][comment // --组]\n[comment // ++组][comment // A++][comment // 图][url=b][comment // A--][comment // --组]');
+ const merged=parse('[comment // $++组][comment // $A++][comment // $图][img]a[/img][comment // $A--][comment // $--组]\n[comment // $++组][comment // $A++][comment // $图][url=b][comment // $A--][comment // $--组]');
  const mergedBlock=blockAt(merged,['组','图']);
  assert.equal(merged.blocks.filter(x=>x.logicalPath.join('/')==='组/图').length,1);
  assert.equal(mergedBlock.sourceOccurrences.length,2);
@@ -33,7 +33,7 @@ test('同父同名 Block 合并多个 sourceOccurrences',()=>{
 });
 
 test('Slot 单 source；重复不覆盖并有可定位冲突诊断',()=>{
- const text='[comment // ++组][comment // A][img]one[/img]\n[comment // A][img]two[/img][comment // --组]';
+ const text='[comment // $++组][comment // $A][img]one[/img]\n[comment // $A][img]two[/img][comment // $--组]';
  const m=parse(text); const slot=m.slots[0];
  assert.equal(m.slots.length,1); assert.equal(slot.source.value,'one'); assert.equal(slot.conflicts.length,1);
  const issue=m.diagnostics.find(x=>x.code==='duplicate-slot');
@@ -42,8 +42,8 @@ test('Slot 单 source；重复不覆盖并有可定位冲突诊断',()=>{
 });
 
 test('图片默认按最终 Slot 名匹配，后者生效且删除恢复',()=>{
- const first='[comment // #悬停效果!图片 = old]\n'; const second='[comment // #悬停效果!图片 = new]\n';
- const suffixResource='[comment // 悬停效果++][comment // icon-01][style dybg 1;2;3;4;5;value][comment // 悬停效果--]';
+ const first='[comment // $#悬停效果!图片 = old]\n'; const second='[comment // $#悬停效果!图片 = new]\n';
+ const suffixResource='[comment // $悬停效果++][comment // $icon-01][style dybg 1;2;3;4;5;value][comment // $悬停效果--]';
  const matched=parse(first+second+suffixResource); const matchedSlot=matched.slots[0];
  assert.equal(matchedSlot.name,'悬停效果'); assert.equal(matchedSlot.defaultValue,'new');
  assert.equal(matched.defaultDeclarations[0].shadowedByTokenId,matched.defaultDeclarations[1].id);
@@ -52,18 +52,18 @@ test('图片默认按最终 Slot 名匹配，后者生效且删除恢复',()=>{
 });
 
 test('Slot 与 StyleBlock source 显式保留重命名 token 引用',()=>{
- const suffix=parse('[comment // 尾++][comment // 图][img]x[/img][comment // 尾--]');
+ const suffix=parse('[comment // $尾++][comment // $图][img]x[/img][comment // $尾--]');
  const suffixSlot=suffix.slots[0];
  assert.equal(suffixSlot.name,'尾');
  assert.equal(suffix.tokensById[suffixSlot.source.nameTokenId].mode,'suffixOpen');
  assert.equal(suffixSlot.source.pairedNameTokenId,suffix.tokensById[suffixSlot.source.nameTokenId].pairedTokenId);
  assert.equal(suffixSlot.source.nameToken.name,'尾');
  assert.equal(suffixSlot.source.pairedNameToken.name,'尾');
- const ordinary=parse('[comment // 普通][img]x[/img]').slots[0];
+ const ordinary=parse('[comment // $普通][img]x[/img]').slots[0];
  assert.equal(ordinary.source.nameTokenId,ordinary.source.nameTokenId);
  assert.equal(ordinary.source.nameToken.mode,'name');
  assert.equal(ordinary.source.pairedNameTokenId,'');
- const style=parse('[comment // 样式!属性][style color #ffffff]').styleBlocks[0];
+ const style=parse('[comment // $样式!属性][style color #ffffff]').styleBlocks[0];
  assert.equal(style.source.nameTokenId,style.source.nameTokenId);
  assert.equal(style.source.nameToken.name,'样式');
  assert.equal(style.source.pairedNameTokenId,'');
@@ -71,29 +71,49 @@ test('Slot 与 StyleBlock source 显式保留重命名 token 引用',()=>{
  assert.equal(uncategorized.source.nameTokenId,'');
  assert.equal(uncategorized.source.nameToken,null);
 });
+test('ordinary comments do not create extension semantics',()=>{
+ const text='[comment // ++ordinary][comment // name][img]x[/img][comment // name!\u6587\u672c][comment // name!\u5c5e\u6027][comment // #name!\u56fe\u7247 = y][comment // name++][comment // name--][comment // --ordinary]';
+ const m=parse(text);
+ assert.equal(Object.keys(m.tokensById).length,0); assert.equal(m.defaultDeclarations.length,0); assert.equal(m.styleBlocks.length,0); assert.equal(m.diagnostics.length,0);
+ assert.equal(m.slots.length,1); assert.equal(m.slots[0].name,'\u672a\u5206\u7c7b'); assert.equal(m.slots[0].source.nameToken,null);
+ const stack=parse('[comment // $++extension][comment // --extension][img]z[/img]');
+ assert.equal(stack.diagnostics.length,1); assert.match(stack.diagnostics[0].message,/\u672a\u95ed\u5408/); assert.deepEqual(stack.slots[0].logicalPath,['\u672a\u5206\u7c7b','\u672a\u5206\u7c7b']);
+});
+
+test('resources after ordinary comments remain uncategorized',()=>{
+ const m=parse('[comment // image][img]a[/img]\n[comment // link][url=b]\n[comment // background][style dybg 1;2;3;4;5;c]');
+ assert.deepEqual(m.slots.map(x=>[x.source.sourceKind,x.name]),[['img','\u672a\u5206\u7c7b'],['url','\u672a\u5206\u7c7b'],['dybg','\u672a\u5206\u7c7b']]);
+ assert.ok(m.slots.every(x=>x.source.nameTokenId===''));
+});
+
+test('$ namespace prefix is excluded from name and nameRange',()=>{
+ const text='[comment //   $   real-name   ][img]x[/img]'; const m=parse(text); const token=Object.values(m.tokensById)[0];
+ assert.equal(token.name,'real-name'); assert.equal(text.slice(token.nameRange.start,token.nameRange.end),'real-name'); assert.equal(m.slots[0].name,'real-name');
+});
+
 test('Slot 三态严格派生为 disabled/default/manual',()=>{
- const empty=parse('[comment // A][img][/img]').slots[0];
- const emptyWithDefault=parse('[comment // #A!图片 = x]\n[comment // A][img][/img]').slots[0];
- const equal=parse('[comment // #A!图片 = x]\n[comment // A][img]x[/img]').slots[0];
- const custom=parse('[comment // #A!图片 = x]\n[comment // A][img]y[/img]').slots[0];
- const noDefault=parse('[comment // A][img]y[/img]').slots[0];
+ const empty=parse('[comment // $A][img][/img]').slots[0];
+ const emptyWithDefault=parse('[comment // $#A!图片 = x]\n[comment // $A][img][/img]').slots[0];
+ const equal=parse('[comment // $#A!图片 = x]\n[comment // $A][img]x[/img]').slots[0];
+ const custom=parse('[comment // $#A!图片 = x]\n[comment // $A][img]y[/img]').slots[0];
+ const noDefault=parse('[comment // $A][img]y[/img]').slots[0];
  assert.deepEqual([empty.valueState,emptyWithDefault.valueState,equal.valueState,custom.valueState,noDefault.valueState],['disabled','disabled','default','manual','manual']);
 });
 
 test('!属性形成具名 StyleBlock，suffix 仍作为其父 Block',()=>{
- const m=parse('[comment // ++组][comment // 尾++][comment // 全局!属性][style color #ffffff][comment // 尾--][comment // --组]');
+ const m=parse('[comment // $++组][comment // $尾++][comment // $全局!属性][style color #ffffff][comment // $尾--][comment // $--组]');
  assert.equal(m.styleBlocks.length,1); assert.equal(m.slots.length,0);
  assert.equal(m.styleBlocks[0].name,'全局'); assert.deepEqual(blockAt(m,['组','尾']).styleBlocks.map(x=>x.name),['全局']);
  assert.equal(m.styleBlocks[0].fields[0].value,'#ffffff');
 });
 
 test('逻辑 ID 与内容 fingerprint 分离',()=>{
- const a=parse('[comment // A][url=one]').slots[0]; const b=parse('[comment // A][url=two]').slots[0];
+ const a=parse('[comment // $A][url=one]').slots[0]; const b=parse('[comment // $A][url=two]').slots[0];
  assert.equal(a.logicalId,b.logicalId); assert.notEqual(a.source.contentFingerprint,b.source.contentFingerprint);
 });
 
 test('range 切片受 generation 和边界保护',()=>{
- const text='前[comment // A][url=x]后'; const m=parse(text); const range=m.slots[0].source.range;
+ const text='前[comment // $A][url=x]后'; const m=parse(text); const range=m.slots[0].source.range;
  assert.equal(model.sliceModelRange(m,range),'[url=x]');
  assert.throws(()=>model.sliceModelRange({...m,snapshot:m.snapshot+'x'},range),/generation/);
  assert.throws(()=>model.sliceModelRange(m,{start:-1,end:2}),RangeError);

@@ -3,23 +3,21 @@ const assert=require('node:assert/strict');
 const path=require('node:path');
 const {pathToFileURL}=require('node:url');
 
-let model,guards,EditorState,history,undo,redo;
+let model,guards,createTextHistory;
 test.before(async()=>{
- [model,guards,{EditorState},{history,undo,redo}]=await Promise.all([
+ [model,guards,{createTextHistory}]=await Promise.all([
   import(pathToFileURL(path.resolve('src/banner-model.js')).href),
   import(pathToFileURL(path.resolve('src/catalog-guards.js')).href),
-  import('@codemirror/state'),
-  import('@codemirror/commands')
+  import(pathToFileURL(path.resolve('src/editor-transaction.js')).href)
  ]);
 });
 
 function harness(text){
- let state=EditorState.create({doc:text,extensions:[history()]});
- const view={get state(){return state},dispatch(spec){state=state.update(spec).state}};
- return {view,get text(){return state.doc.toString()},dispatch(replacements,generation){
-  const checked=guards.validateReplacements(state.doc.toString(),generation,replacements);
+ const history=createTextHistory(text);
+ return {history,get text(){return history.text},dispatch(replacements,generation){
+  const checked=guards.validateReplacements(history.text,generation,replacements);
   assert.equal(checked.ok,true,checked.reason);
-  view.dispatch({changes:checked.replacements.map(item=>({from:item.start,to:item.end,insert:item.value}))});
+  history.execute(checked.replacements);
   return checked;
  }};
 }
@@ -27,7 +25,7 @@ function renameReplacement(token,value){return {start:token.nameRange.start,end:
 function blockAt(m,pathParts){return m.blocks.find(block=>JSON.stringify(block.logicalPath)===JSON.stringify(pathParts))}
 
 test('Block 多来源名称真实批量写回并单步 undo',()=>{
- const original='[comment // ++组][comment // A][img]one[/img][comment // --组]\n[comment // ++组][comment // B][url=two][comment // --组]';
+ const original='[comment // $++组][comment // $A][img]one[/img][comment // $--组]\n[comment // $++组][comment // $B][url=two][comment // $--组]';
  const initial=model.buildBannerModel(original); const block=blockAt(initial,['组']);
  assert.equal(block.sourceOccurrences.length,2);
  const tokenIds=new Set();
@@ -38,12 +36,13 @@ test('Block 多来源名称真实批量写回并单步 undo',()=>{
  const renamed=model.buildBannerModel(editor.text); const renamedBlock=blockAt(renamed,['新组']);
  assert.equal(renamedBlock.sourceOccurrences.length,2);
  assert.equal(renamed.blocks.some(item=>item.name==='组'),false);
- assert.equal(undo(editor.view),true); assert.equal(editor.text,original);
+ assert.ok(editor.text.includes('$++'+renamedBlock.name)); assert.equal(editor.text.includes('++'+renamedBlock.name) && !editor.text.includes('$++'+renamedBlock.name),false);
+ assert.equal(editor.history.undo(),true); assert.equal(editor.text,original);
  const restored=model.buildBannerModel(editor.text); assert.equal(blockAt(restored,['组']).sourceOccurrences.length,2);
 });
 
 test('suffix Slot open/close token 原子重命名并保持路径',()=>{
- const original='[comment // ++甲][comment // 乙++][comment // 图][img]x[/img][comment // 乙--][comment // --甲]';
+ const original='[comment // $++甲][comment // $乙++][comment // $图][img]x[/img][comment // $乙--][comment // $--甲]';
  const initial=model.buildBannerModel(original); const slot=initial.slots[0];
  const ids=[slot.source.nameTokenId,slot.source.pairedNameTokenId];
  const replacements=ids.map(id=>renameReplacement(initial.tokensById[id],'新乙'));
@@ -53,22 +52,22 @@ test('suffix Slot open/close token 原子重命名并保持路径',()=>{
  assert.deepEqual(renamed.slots[0].logicalPath,['甲','图','新乙']);
  assert.equal(renamed.slots[0].source.nameToken.name,'新乙');
  assert.equal(renamed.slots[0].source.pairedNameToken.name,'新乙');
- assert.equal(undo(editor.view),true); assert.equal(editor.text,original);
+ assert.equal(editor.history.undo(),true); assert.equal(editor.text,original);
 });
 
 test('图片 Slot clear/default 使用真实 valueRange 并支持 undo redo',()=>{
  const defaultUrl='./default.webp';
- const original='[comment // #图!图片 = '+defaultUrl+']\n[comment // 图][img]manual.webp[/img]';
+ const original='[comment // $#图!图片 = '+defaultUrl+']\n[comment // $图][img]manual.webp[/img]';
  const initial=model.buildBannerModel(original); const slot=initial.slots[0]; const range=slot.source.valueRange;
  assert.equal(model.sliceModelRange(initial,range),'manual.webp'); assert.equal(slot.valueState,'manual');
  const editor=harness(original);
  editor.dispatch([{start:range.start,end:range.end,value:'',expected:'manual.webp'}],initial.generation);
  const cleared=model.buildBannerModel(editor.text); assert.equal(cleared.slots[0].source.value,''); assert.equal(cleared.slots[0].valueState,'disabled');
- assert.equal(undo(editor.view),true); assert.equal(editor.text,original);
+ assert.equal(editor.history.undo(),true); assert.equal(editor.text,original);
  const restored=model.buildBannerModel(editor.text); assert.equal(restored.slots[0].valueState,'manual');
  const restoredRange=restored.slots[0].source.valueRange;
  editor.dispatch([{start:restoredRange.start,end:restoredRange.end,value:defaultUrl,expected:'manual.webp'}],restored.generation);
  const defaulted=model.buildBannerModel(editor.text); assert.equal(defaulted.slots[0].source.value,defaultUrl); assert.equal(defaulted.slots[0].valueState,'default');
- assert.equal(undo(editor.view),true); assert.equal(editor.text,original);
- assert.equal(redo(editor.view),true); assert.equal(model.buildBannerModel(editor.text).slots[0].valueState,'default');
+ assert.equal(editor.history.undo(),true); assert.equal(editor.text,original);
+ assert.equal(editor.history.redo(),true); assert.equal(model.buildBannerModel(editor.text).slots[0].valueState,'default');
 });

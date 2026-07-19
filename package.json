@@ -5,7 +5,7 @@
   "description": "Local Electron GUI for previewing NGA BBCode.",
   "main": "src/main.js",
   "scripts": {
-    "build:renderer": "esbuild src/renderer-entry.js --bundle --platform=browser --format=iife --outfile=dist/renderer.js",
+    "build:renderer": "esbuild src/renderer-entry.js --bundle --platform=browser --format=iife --loader:.ttf=file --loader:.css=css --outfile=dist/renderer.js && esbuild src/monaco-worker.js --bundle --platform=browser --format=iife --outfile=dist/monaco-worker.js",
     "test": "node --test tests/*.test.js",
     "start": "npm run build:renderer && electron .",
     "benchmark": "node scripts/benchmark.js"
@@ -15,9 +15,6 @@
     "esbuild": "^0.28.1"
   },
   "dependencies": {
-    "@codemirror/commands": "^6.10.4",
-    "@codemirror/search": "^6.7.1",
-    "@codemirror/state": "^6.7.1",
-    "@codemirror/view": "^6.43.6"
+    "monaco-editor": "^0.55.1"
   }
 }
